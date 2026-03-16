@@ -1,21 +1,27 @@
 import asyncio
 import time
 import openai
+import sys
 import os
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Загружаем переменные из файла .env
+# Загружаем переменные окружения из файла .env (для локальной разработки)
 load_dotenv()
 
 # ===== НАСТРОЙКИ =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 
-# Проверка, что ключи загружены (чтобы сразу увидеть ошибку, если .env не найден)
+# Проверка наличия ключей
 if not TELEGRAM_TOKEN or not DEEPSEEK_API_KEY:
-    raise ValueError("Не найдены TELEGRAM_TOKEN или DEEPSEEK_API_KEY в переменных окружения")
+    print("❌ Ошибка: TELEGRAM_TOKEN или DEEPSEEK_API_KEY не найдены в переменных окружения!")
+    print(f"TELEGRAM_TOKEN: {'задан' if TELEGRAM_TOKEN else 'не задан'}")
+    print(f"DEEPSEEK_API_KEY: {'задан' if DEEPSEEK_API_KEY else 'не задан'}")
+    sys.exit(1)  # Завершаем программу, чтобы ошибка была видна в логах
+else:
+    print("✅ Переменные окружения успешно загружены.")
 
 openai.api_base = "https://api.deepseek.com/v1"
 openai.api_key = DEEPSEEK_API_KEY
@@ -142,13 +148,13 @@ SYSTEM_PROMPT = """
 """
 
 MAX_HISTORY = 10
-SESSION_DURATION = 30 * 60  # 40 минут
+SESSION_DURATION = 30 * 60  # 30 минут
 COOLDOWN_SECONDS = 24 * 3600  # 24 часа
 TIMER_UPDATE_INTERVAL = 60  # обновлять каждую минуту
 
 # Завершающее сообщение в стиле Джеймса Холлиса
 END_MESSAGE = (
-    "🕊️ Благодарю вас за доверие и мужество быть здесь. "
+    "🕊️ Наше время истекло. Благодарю вас за доверие и мужество быть здесь. "
     "Помните: настоящая работа происходит в промежутках между сессиями — "
     "в ваших снах, в тишине, в неожиданных чувствах. "
     "Носите это с собой до нашей следующей встречи. Берегите себя."
@@ -241,6 +247,7 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Логика начала новой сессии (вызывается из /start и кнопки 'Начать сессию')."""
+    print("🟢 Вызвана start_session")
     # Завершаем предыдущую сессию, если она была активна
     await cleanup_session(context)
 
@@ -258,6 +265,7 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Запускаем таймер с обратным отсчётом
+    print("⏱️ Запускаем таймер")
     task = asyncio.create_task(session_timeout_with_timer(update.effective_chat.id, context))
     context.user_data['timer_task'] = task
     context.user_data['history'] = []
@@ -276,37 +284,46 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "это не враги, это посланники.\n\n"
         "Итак, расскажите мне, что привело вас сюда сегодня. Не торопитесь. Мы никуда не спешим. "
         "Просто позвольте себе начать говорить, и посмотрим, куда нас это приведет.\n\n"
+        "Сессия продлится 30 минут. Через это время она завершится автоматически."
     )
     await update.message.reply_text(welcome_text, reply_markup=END_KEYBOARD)
+    print("✅ Приветствие отправлено")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start — просто вызывает start_session."""
+    print("📨 Получена команда /start")
     await start_session(update, context)
 
 async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение сессии по команде /end или кнопке."""
+    print("🔚 Получена команда /end или кнопка Завершить сессию")
     await cleanup_session(context)
     await update.message.reply_text(
         END_MESSAGE,
         reply_markup=START_KEYBOARD
     )
+    print("✅ Сессия завершена")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
+    print(f"💬 Получено сообщение: {user_message}")
 
     # Обработка кнопки "Начать сессию"
     if user_message == "Начать сессию":
+        print("🟢 Нажата кнопка 'Начать сессию'")
         await start_session(update, context)
         return
 
     # Обработка кнопки "Завершить сессию"
     if user_message == "Завершить сессию":
+        print("🔚 Нажата кнопка 'Завершить сессию'")
         await end(update, context)
         return
 
     # Проверяем, активна ли сессия (есть ли живой таймер)
     timer_task = context.user_data.get('timer_task')
     if not timer_task or timer_task.done():
+        print("⏸️ Сессия не активна, предлагаем начать")
         await update.message.reply_text(
             "Сейчас нет активной сессии. Нажмите «Начать сессию», чтобы мы могли поговорить.",
             reply_markup=START_KEYBOARD
@@ -315,6 +332,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Показываем индикатор "печатает"
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    print("⌨️ Отправлен сигнал typing")
 
     # Добавляем сообщение пользователя в историю
     if 'history' not in context.user_data:
@@ -327,41 +345,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + context.user_data['history']
 
     try:
+        print("🔄 Отправляем запрос к DeepSeek...")
         response = openai.ChatCompletion.create(
             model="deepseek-chat",
             messages=messages,
             max_tokens=1500,
-            temperature=1.2
+            temperature=1
         )
-        # Чистый ответ от модели (без добавленного времени)
+        print("✅ Ответ от DeepSeek получен")
         clean_reply = response.choices[0].message.content
 
         # Сохраняем чистый ответ в историю
         context.user_data['history'].append({"role": "assistant", "content": clean_reply})
 
-        # Ограничиваем историю (если нужно)
         if len(context.user_data['history']) > MAX_HISTORY * 2:
             context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
-        # Добавляем оставшееся время только для отправки пользователю
+        # Добавляем оставшееся время к ответу
         time_str = get_remaining_time(context)
         reply_with_time = clean_reply
         if time_str:
             reply_with_time += time_str
 
     except Exception as e:
+        print(f"❌ Ошибка при запросе к DeepSeek: {e}")
         reply_with_time = f"Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже.\n\nДетали: {e}"
 
-    # Отправляем ответ с временем
     await update.message.reply_text(reply_with_time, reply_markup=END_KEYBOARD)
+    print("📤 Ответ отправлен пользователю")
 
 def main():
+    print("🚀 Функция main() запущена!")
+    print(f"🔑 TELEGRAM_TOKEN загружен: {'да' if TELEGRAM_TOKEN else 'нет'}")
+    print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
+    print(f"🔌 openai.api_base: {openai.api_base}")
+    
+    # Создаём приложение
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    print("✅ Application создан")
+
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Бот с завершающим сообщением в стиле Холлиса запущен. Нажмите Ctrl+C для остановки.")
+    print("✅ Обработчики добавлены")
+
+    # Запускаем бота
+    print("🔄 Запускаем polling...")
     app.run_polling(timeout=50, drop_pending_updates=True)
 
 if __name__ == "__main__":
+    print("🐍 Скрипт bot.py запущен")
     main()
