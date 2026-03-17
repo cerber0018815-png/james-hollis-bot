@@ -208,6 +208,7 @@ def get_remaining_time(context: ContextTypes.DEFAULT_TYPE) -> str:
     return f"\n\n⏳ Осталось: {minutes} мин {seconds} сек"
 
 
+# ===== ИЗМЕНЕНО: генерация итогового напутствия =====
 async def generate_session_summary(history: list) -> str:
     """
     Генерирует завершающее поддерживающее сообщение на основе истории,
@@ -230,10 +231,12 @@ async def generate_session_summary(history: list) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history_copy
     try:
         print("🔄 Генерация итогового сообщения...")
-        response = openai.ChatCompletion.create(
+        # Используем asyncio.to_thread для асинхронного выполнения
+        response = await asyncio.to_thread(
+            openai.ChatCompletion.create,
             model="deepseek-chat",
             messages=messages,
-            max_tokens=1500,          # можно увеличить для более развёрнутого ответа
+            max_tokens=1500,
             temperature=1
         )
         summary = response.choices[0].message.content
@@ -244,44 +247,45 @@ async def generate_session_summary(history: list) -> str:
         return None
 
 
-# ===== НОВЫЕ ФУНКЦИИ ДЛЯ ТАЙМЕРА =====
-
+# ===== ФУНКЦИИ ДЛЯ ТАЙМЕРА (С ОТЛАДКОЙ) =====
 async def update_timer_periodically(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Каждую минуту обновляет сообщение с таймером.
-    Завершается, если сессия закончилась или message_id устарел (появился новый таймер).
-    """
+    print(f"🕒 [TIMER] Запущена задача для сообщения {message_id}")
     try:
+        # Ждём первую минуту, чтобы избежать ошибки "Message is not modified"
+        await asyncio.sleep(TIMER_UPDATE_INTERVAL)
+        
         while True:
+            print(f"🕒 [TIMER] Цикл, message_id={message_id}")
             # Проверяем, актуально ли ещё это сообщение
             current_timer_id = context.user_data.get('timer_message_id')
             if current_timer_id != message_id:
-                # Запущена новая задача для другого сообщения — выходим
+                print(f"🕒 [TIMER] message_id устарел: текущий {current_timer_id}, ожидался {message_id} → завершаемся")
                 break
 
             # Проверяем, активна ли сессия
             if 'session_start_time' not in context.user_data:
-                # Сессия завершена — удаляем сообщение и выходим
+                print("🕒 [TIMER] Сессия завершена, удаляем сообщение")
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"🕒 [TIMER] Не удалось удалить сообщение: {e}")
                 break
 
             elapsed = time.time() - context.user_data['session_start_time']
             remaining = SESSION_DURATION - elapsed
             if remaining <= 0:
-                # Время вышло — удаляем сообщение (завершение сессии обработает другая задача)
+                print("🕒 [TIMER] Время сессии истекло, удаляем сообщение")
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"🕒 [TIMER] Не удалось удалить сообщение: {e}")
                 break
 
             # Формируем текст таймера
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
             timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
+            print(f"🕒 [TIMER] Обновляем: {timer_text}")
 
             # Редактируем сообщение
             try:
@@ -290,48 +294,61 @@ async def update_timer_periodically(chat_id: int, message_id: int, context: Cont
                     message_id=message_id,
                     text=timer_text
                 )
+                print("🕒 [TIMER] Успешно обновлено")
             except Exception as e:
-                # Если не удалось отредактировать (сообщение удалено или другие ошибки), выходим
-                print(f"Не удалось обновить таймер: {e}")
+                print(f"🕒 [TIMER] Не удалось обновить таймер: {e}")
                 break
 
             await asyncio.sleep(TIMER_UPDATE_INTERVAL)
     except asyncio.CancelledError:
-        # Задача отменена — удаляем сообщение
+        print(f"🕒 [TIMER] Задача {message_id} отменена, удаляем сообщение")
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except:
-            pass
+        except Exception as e:
+            print(f"🕒 [TIMER] Не удалось удалить сообщение при отмене: {e}")
         raise
 
 
 async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Отменяет старую задачу таймера, удаляет старое сообщение и запускает новую."""
+    print(f"🔄 [REFRESH] Запуск refresh_timer для чата {chat_id}")
     # Отменяем предыдущую задачу
     old_task = context.user_data.get('timer_task')
     if old_task and not old_task.done():
+        print("🔄 [REFRESH] Отменяем старую задачу")
         old_task.cancel()
         try:
             await old_task
         except asyncio.CancelledError:
-            pass
+            print("🔄 [REFRESH] Старая задача успешно отменена")
+        except Exception as e:
+            print(f"🔄 [REFRESH] Ошибка при ожидании отмены старой задачи: {e}")
 
     # Удаляем предыдущее сообщение таймера
     old_msg_id = context.user_data.get('timer_message_id')
     if old_msg_id:
+        print(f"🔄 [REFRESH] Удаляем старое сообщение {old_msg_id}")
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-        except:
-            pass
+            print("🔄 [REFRESH] Старое сообщение удалено")
+        except Exception as e:
+            print(f"🔄 [REFRESH] Ошибка при удалении старого сообщения: {e}")
 
     # Если сессия ещё активна, отправляем новое сообщение и запускаем задачу
     if 'session_start_time' in context.user_data:
         remaining = SESSION_DURATION - (time.time() - context.user_data['session_start_time'])
+        print(f"🔄 [REFRESH] Оставшееся время: {remaining} сек")
         if remaining > 0:
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
             timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
-            timer_msg = await context.bot.send_message(chat_id=chat_id, text=timer_text)
+            print(f"🔄 [REFRESH] Отправляем новое сообщение: {timer_text}")
+            try:
+                timer_msg = await context.bot.send_message(chat_id=chat_id, text=timer_text)
+                print(f"🔄 [REFRESH] Сообщение отправлено, message_id = {timer_msg.message_id}")
+            except Exception as e:
+                print(f"🔄 [REFRESH] Не удалось отправить сообщение таймера: {e}")
+                return
+
             context.user_data['timer_message_id'] = timer_msg.message_id
 
             # Запускаем новую задачу
@@ -339,6 +356,11 @@ async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 update_timer_periodically(chat_id, timer_msg.message_id, context)
             )
             context.user_data['timer_task'] = task
+            print("🔄 [REFRESH] Запущена новая задача update_timer_periodically")
+        else:
+            print("🔄 [REFRESH] Сессия активна, но время истекло (remaining <= 0) — таймер не запускаем")
+    else:
+        print("🔄 [REFRESH] Сессия не активна (session_start_time отсутствует) — таймер не запускаем")
 
 
 async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -369,10 +391,26 @@ async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYP
     context.user_data['history'] = []
 
 
-# ===== ОСНОВНЫЕ ФУНКЦИИ =====
+# ===== НОВАЯ ФУНКЦИЯ: индикатор печати =====
+async def send_typing_periodically(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет действие 'typing' сразу, затем каждые 4 секунды, пока не будет отменена."""
+    try:
+        while True:
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            except Exception as e:
+                # Если не удалось отправить (например, чат заблокирован), просто выходим
+                print(f"Ошибка при отправке typing: {e}")
+                break
+            await asyncio.sleep(4)
+    except asyncio.CancelledError:
+        # Задача отменена — корректно завершаемся
+        pass
 
+
+# ===== ОСНОВНЫЕ ФУНКЦИИ СЕССИИ =====
 async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: bool = True, chat_id: int = None):
-    """Завершает текущую сессию: отменяет таймер и задачу истечения, записывает время, опционально очищает историю."""
+    """Завершает текущую сессию: отменяет все задачи, записывает время, опционально очищает историю."""
     was_active = False
 
     # Отменяем задачу обновления таймера
@@ -391,6 +429,15 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
         exp_task.cancel()
         try:
             await exp_task
+        except asyncio.CancelledError:
+            pass
+
+    # Отменяем задачу индикатора печати, если есть
+    typing_task = context.user_data.get('typing_task')
+    if typing_task and not typing_task.done():
+        typing_task.cancel()
+        try:
+            await typing_task
         except asyncio.CancelledError:
             pass
 
@@ -416,6 +463,7 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
     context.user_data.pop('timer_task', None)
     context.user_data.pop('timer_message_id', None)
     context.user_data.pop('expiration_task', None)
+    context.user_data.pop('typing_task', None)
     context.user_data.pop('session_start_time', None)
 
     return was_active
@@ -540,9 +588,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Показываем индикатор "печатает"
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    print("⌨️ Отправлен сигнал typing")
+    # --- НОВОЕ: запускаем периодическую отправку typing ---
+    typing_task = asyncio.create_task(
+        send_typing_periodically(update.effective_chat.id, context)
+    )
+    context.user_data['typing_task'] = typing_task
 
     # Добавляем сообщение пользователя в историю
     if 'history' not in context.user_data:
@@ -556,7 +606,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         print("🔄 Отправляем запрос к DeepSeek...")
-        response = openai.ChatCompletion.create(
+        response = await asyncio.to_thread(
+            openai.ChatCompletion.create,
             model="deepseek-chat",
             messages=messages,
             max_tokens=1500,
@@ -565,13 +616,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("✅ Ответ от DeepSeek получен")
         clean_reply = response.choices[0].message.content
 
-        # Сохраняем чистый ответ в историю
+        # Сохраняем ответ в историю
         context.user_data['history'].append({"role": "assistant", "content": clean_reply})
 
         if len(context.user_data['history']) > MAX_HISTORY * 2:
             context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
-        # Разбиваем длинный ответ и отправляем по частям
+        # --- НОВОЕ: отменяем задачу typing перед отправкой ответа ---
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+        context.user_data.pop('typing_task', None)
+
+        # Отправляем ответ по частям
         parts = split_long_message(clean_reply)
         for i, part in enumerate(parts):
             if i == 0:
@@ -579,14 +638,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(part)
 
-        # После отправки ответа обновляем таймер (новое сообщение под ответом)
+        # Обновляем таймер
         await refresh_timer(update.effective_chat.id, context)
 
     except Exception as e:
         print(f"❌ Ошибка при запросе к DeepSeek: {e}")
+
+        # --- НОВОЕ: в случае ошибки тоже отменяем typing ---
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+        context.user_data.pop('typing_task', None)
+
         error_message = f"Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже.\n\nДетали: {e}"
         await update.message.reply_text(error_message, reply_markup=END_KEYBOARD)
-        # В случае ошибки тоже обновляем таймер? Можно, чтобы не терять отсчёт
         await refresh_timer(update.effective_chat.id, context)
 
 
