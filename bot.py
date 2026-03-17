@@ -37,12 +37,12 @@ except FileNotFoundError:
     print(f"⚠️ Файл {PROMPT_FILE} не найден. Использую встроенный промпт по умолчанию.")
     # Встроенный промпт (на случай отсутствия файла)
     SYSTEM_PROMPT = """
+Технические ограничения и форма ответов:
+
+Ты должен строго следить за длиной своих сообщений. Максимальная длина одного сообщения — 3700 символов. старайся уложить ответ в этот предел не теряяглубины, трогательности чуткости ответа. Это необходимо, чтобы Telegram гарантированно доставил ответ (абсолютный лимит 4096, мы оставляем запас).
+
 Системный промт (Role/Instruction)
 Ты — Джеймс Холлис, юнгианский психоаналитик, автор книги «Перевал в середине пути». Ты обращаешься к человеку, который чувствует растерянность, боль, усталость или потерю смысла. Твоя задача — создать для него безопасное, тёплое и бережное пространство, где он сможет выдохнуть.
-
-Технические ограничения и форма ответов:
-Ты должен строго следить за длиной своих сообщений. Максимальная длина одного сообщения — 3800 символов. Это необходимо, чтобы Telegram гарантированно доставил ответ (абсолютный лимит 4096, мы оставляем запас).
-
 
 Твои главные принципы:
 
@@ -160,7 +160,7 @@ SESSION_DURATION = 30 * 60  # 30 минут
 COOLDOWN_SECONDS = 24 * 3600  # 24 часа
 TIMER_UPDATE_INTERVAL = 60  # обновлять каждую минуту
 
-# Завершающее сообщение в стиле Джеймса Холлиса
+# Завершающее сообщение в стиле Джеймса Холлиса (используется, если не удалось сгенерировать итог)
 END_MESSAGE = (
     "🕊️ Благодарю вас за доверие и мужество быть здесь. "
     "Помните: настоящая работа происходит в промежутках между сессиями — "
@@ -171,6 +171,29 @@ END_MESSAGE = (
 # Клавиатуры
 START_KEYBOARD = ReplyKeyboardMarkup([["Начать сессию"]], resize_keyboard=True)
 END_KEYBOARD = ReplyKeyboardMarkup([["Завершить сессию"]], resize_keyboard=True)
+
+
+# ===== ФУНКЦИЯ ДЛЯ РАЗБИВКИ ДЛИННЫХ СООБЩЕНИЙ =====
+def split_long_message(text: str, max_length: int = 4096) -> list[str]:
+    """
+    Разбивает текст на части, не превышающие max_length символов.
+    Старается делить по границам слов (пробелам).
+    """
+    if len(text) <= max_length:
+        return [text]
+    parts = []
+    while text:
+        if len(text) <= max_length:
+            parts.append(text)
+            break
+        # Ищем последний пробел в пределах лимита
+        split_index = text.rfind(' ', 0, max_length)
+        if split_index == -1:  # пробелов нет – режем по max_length
+            split_index = max_length
+        parts.append(text[:split_index].strip())
+        text = text[split_index:].strip()
+    return parts
+
 
 def get_remaining_time(context: ContextTypes.DEFAULT_TYPE) -> str:
     """Возвращает строку с оставшимся временем сессии или пустую строку, если сессия не активна."""
@@ -184,62 +207,201 @@ def get_remaining_time(context: ContextTypes.DEFAULT_TYPE) -> str:
     seconds = int(remaining % 60)
     return f"\n\n⏳ Осталось: {minutes} мин {seconds} сек"
 
-async def session_timeout_with_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Управляет таймером и отправляет обновления каждую минуту."""
-    message = None
+
+async def generate_session_summary(history: list) -> str:
+    """
+    Генерирует завершающее поддерживающее сообщение на основе истории,
+    используя тот же системный промпт (Джеймс Холлис).
+    Добавляет в историю запрос от пользователя написать напутствие.
+    """
+    if not history:
+        return None
+    # Копируем историю, чтобы не изменять оригинал
+    history_copy = history.copy()
+    # Добавляем сообщение от пользователя с просьбой подвести итог и дать напутствие
+    history_copy.append({
+        "role": "user",
+        "content": (
+            "Наша сессия подходит к концу. Пожалуйста, напиши завершающее поддерживающее напутствие, "
+            "учитывая всё, что мы обсуждали. Если уместно, мягко пригласи к следующей сессии. "
+            "Сохрани свой обычный тон (Джеймс Холлис)."
+        )
+    })
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history_copy
     try:
-        for remaining in range(SESSION_DURATION, 0, -TIMER_UPDATE_INTERVAL):
-            if remaining <= 0:
+        print("🔄 Генерация итогового сообщения...")
+        response = openai.ChatCompletion.create(
+            model="deepseek-chat",
+            messages=messages,
+            max_tokens=1500,          # можно увеличить для более развёрнутого ответа
+            temperature=1
+        )
+        summary = response.choices[0].message.content
+        print("✅ Итоговое сообщение получено")
+        return summary
+    except Exception as e:
+        print(f"❌ Ошибка при генерации итога: {e}")
+        return None
+
+
+# ===== НОВЫЕ ФУНКЦИИ ДЛЯ ТАЙМЕРА =====
+
+async def update_timer_periodically(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Каждую минуту обновляет сообщение с таймером.
+    Завершается, если сессия закончилась или message_id устарел (появился новый таймер).
+    """
+    try:
+        while True:
+            # Проверяем, актуально ли ещё это сообщение
+            current_timer_id = context.user_data.get('timer_message_id')
+            if current_timer_id != message_id:
+                # Запущена новая задача для другого сообщения — выходим
                 break
-            # Проверяем, не отменён ли таймер
-            if context.user_data.get('timer_task') is not asyncio.current_task():
-                return
 
-            minutes = remaining // 60
-            seconds = remaining % 60
-            time_str = f"⏳ До конца сессии: {minutes} мин {seconds} сек"
+            # Проверяем, активна ли сессия
+            if 'session_start_time' not in context.user_data:
+                # Сессия завершена — удаляем сообщение и выходим
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except:
+                    pass
+                break
 
-            if message is None:
-                # Отправляем первое сообщение с таймером
-                message = await context.bot.send_message(chat_id=chat_id, text=time_str)
-            else:
-                # Обновляем существующее
-                await message.edit_text(time_str)
+            elapsed = time.time() - context.user_data['session_start_time']
+            remaining = SESSION_DURATION - elapsed
+            if remaining <= 0:
+                # Время вышло — удаляем сообщение (завершение сессии обработает другая задача)
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except:
+                    pass
+                break
+
+            # Формируем текст таймера
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
+
+            # Редактируем сообщение
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=timer_text
+                )
+            except Exception as e:
+                # Если не удалось отредактировать (сообщение удалено или другие ошибки), выходим
+                print(f"Не удалось обновить таймер: {e}")
+                break
 
             await asyncio.sleep(TIMER_UPDATE_INTERVAL)
-
-        # Если таймер дожил до конца
-        if context.user_data.get('timer_task') is asyncio.current_task():
-            # Записываем время завершения
-            context.user_data['last_session_end'] = time.time()
-            # Очищаем историю и удаляем время старта
-            context.user_data['history'] = []
-            context.user_data.pop('timer_task', None)
-            context.user_data.pop('session_start_time', None)
-            # Отправляем завершающее сообщение с кнопкой "Начать сессию"
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=END_MESSAGE,
-                reply_markup=START_KEYBOARD
-            )
     except asyncio.CancelledError:
-        # Таймер отменён – удаляем сообщение, если оно было
-        if message:
-            await message.delete()
+        # Задача отменена — удаляем сообщение
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except:
+            pass
         raise
 
-async def cleanup_session(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Завершает текущую сессию: отменяет таймер, записывает время, очищает историю."""
+
+async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Отменяет старую задачу таймера, удаляет старое сообщение и запускает новую."""
+    # Отменяем предыдущую задачу
+    old_task = context.user_data.get('timer_task')
+    if old_task and not old_task.done():
+        old_task.cancel()
+        try:
+            await old_task
+        except asyncio.CancelledError:
+            pass
+
+    # Удаляем предыдущее сообщение таймера
+    old_msg_id = context.user_data.get('timer_message_id')
+    if old_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except:
+            pass
+
+    # Если сессия ещё активна, отправляем новое сообщение и запускаем задачу
+    if 'session_start_time' in context.user_data:
+        remaining = SESSION_DURATION - (time.time() - context.user_data['session_start_time'])
+        if remaining > 0:
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
+            timer_msg = await context.bot.send_message(chat_id=chat_id, text=timer_text)
+            context.user_data['timer_message_id'] = timer_msg.message_id
+
+            # Запускаем новую задачу
+            task = asyncio.create_task(
+                update_timer_periodically(chat_id, timer_msg.message_id, context)
+            )
+            context.user_data['timer_task'] = task
+
+
+async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Вызывается, когда истекло время сессии (30 минут)."""
+    # Проверяем, не завершена ли уже сессия досрочно
+    if 'session_start_time' not in context.user_data:
+        return
+
+    # Сохраняем историю
+    history = context.user_data.get('history', []).copy()
+
+    # Завершаем сессию (без очистки истории)
+    await cleanup_session(context, clear_history=False, chat_id=chat_id)
+
+    # Генерируем итог
+    summary = await generate_session_summary(history) if history else None
+    final_message = summary if summary else END_MESSAGE
+
+    # Отправляем итог
+    parts = split_long_message(final_message)
+    for i, part in enumerate(parts):
+        if i == 0:
+            await context.bot.send_message(chat_id, part, reply_markup=START_KEYBOARD)
+        else:
+            await context.bot.send_message(chat_id, part)
+
+    # Очищаем историю окончательно
+    context.user_data['history'] = []
+
+
+# ===== ОСНОВНЫЕ ФУНКЦИИ =====
+
+async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: bool = True, chat_id: int = None):
+    """Завершает текущую сессию: отменяет таймер и задачу истечения, записывает время, опционально очищает историю."""
     was_active = False
 
-    task = context.user_data.get('timer_task')
-    if task and not task.done():
-        task.cancel()
+    # Отменяем задачу обновления таймера
+    timer_task = context.user_data.get('timer_task')
+    if timer_task and not timer_task.done():
+        timer_task.cancel()
         try:
-            await task
+            await timer_task
         except asyncio.CancelledError:
             pass
         was_active = True
+
+    # Отменяем задачу истечения сессии
+    exp_task = context.user_data.get('expiration_task')
+    if exp_task and not exp_task.done():
+        exp_task.cancel()
+        try:
+            await exp_task
+        except asyncio.CancelledError:
+            pass
+
+    # Если передан chat_id, удаляем последнее сообщение таймера
+    if chat_id:
+        timer_msg_id = context.user_data.get('timer_message_id')
+        if timer_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=timer_msg_id)
+            except:
+                pass
 
     if 'history' in context.user_data and context.user_data['history']:
         was_active = True
@@ -247,17 +409,23 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE) -> bool:
     if was_active:
         context.user_data['last_session_end'] = time.time()
 
-    context.user_data['history'] = []
+    if clear_history:
+        context.user_data['history'] = []
+
+    # Очищаем все временные ключи
     context.user_data.pop('timer_task', None)
+    context.user_data.pop('timer_message_id', None)
+    context.user_data.pop('expiration_task', None)
     context.user_data.pop('session_start_time', None)
 
     return was_active
 
+
 async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Логика начала новой сессии (вызывается из /start и кнопки 'Начать сессию')."""
     print("🟢 Вызвана start_session")
-    # Завершаем предыдущую сессию, если она была активна
-    await cleanup_session(context)
+    # Завершаем предыдущую сессию, если она была активна (с очисткой истории)
+    await cleanup_session(context, clear_history=True, chat_id=update.effective_chat.id)
 
     # Проверяем суточное ограничение
     last_end = context.user_data.get('last_session_end')
@@ -272,13 +440,18 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Запускаем таймер с обратным отсчётом
-    print("⏱️ Запускаем таймер")
-    task = asyncio.create_task(session_timeout_with_timer(update.effective_chat.id, context))
-    context.user_data['timer_task'] = task
+    # Инициализируем новую сессию
     context.user_data['history'] = []
     context.user_data['session_start_time'] = time.time()
 
+    # Запускаем задачу истечения времени (30 минут)
+    async def timeout_wrapper():
+        await asyncio.sleep(SESSION_DURATION)
+        await end_session_by_timeout(update.effective_chat.id, context)
+
+    context.user_data['expiration_task'] = asyncio.create_task(timeout_wrapper())
+
+    # Отправляем приветствие
     welcome_text = (
         "Я рад, что вы пришли. Правда. Знаете, самое трудное в этом путешествии, "
         "которое мы называем жизнью, — это решимость сделать первый шаг. Прийти и сказать: "
@@ -294,22 +467,53 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Просто позвольте себе начать говорить, и посмотрим, куда нас это приведет.\n\n"
     )
     await update.message.reply_text(welcome_text, reply_markup=END_KEYBOARD)
-    print("✅ Приветствие отправлено")
+
+    # Запускаем первый таймер (после приветствия)
+    await refresh_timer(update.effective_chat.id, context)
+
+    print("✅ Сессия начата")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start — просто вызывает start_session."""
     print("📨 Получена команда /start")
     await start_session(update, context)
 
+
 async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение сессии по команде /end или кнопке."""
     print("🔚 Получена команда /end или кнопка Завершить сессию")
-    await cleanup_session(context)
-    await update.message.reply_text(
-        END_MESSAGE,
-        reply_markup=START_KEYBOARD
-    )
-    print("✅ Сессия завершена")
+    chat_id = update.effective_chat.id
+
+    # Сохраняем копию истории перед очисткой
+    history = context.user_data.get('history', []).copy()
+
+    # Завершаем сессию (отменяем задачи, удаляем последний таймер, но историю пока не чистим)
+    await cleanup_session(context, clear_history=False, chat_id=chat_id)
+
+    # Генерируем итоговое сообщение, если была история
+    summary = await generate_session_summary(history) if history else None
+    final_message = summary if summary else END_MESSAGE
+
+    # Разбиваем длинное сообщение и отправляем по частям
+    parts = split_long_message(final_message)
+    for i, part in enumerate(parts):
+        if i == 0:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=part,
+                reply_markup=START_KEYBOARD
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=part
+            )
+
+    # Теперь окончательно очищаем историю
+    context.user_data['history'] = []
+    print("✅ Сессия завершена с итоговым сообщением")
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
@@ -327,9 +531,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await end(update, context)
         return
 
-    # Проверяем, активна ли сессия (есть ли живой таймер)
-    timer_task = context.user_data.get('timer_task')
-    if not timer_task or timer_task.done():
+    # Проверяем, активна ли сессия (наличие session_start_time)
+    if 'session_start_time' not in context.user_data:
         print("⏸️ Сессия не активна, предлагаем начать")
         await update.message.reply_text(
             "Сейчас нет активной сессии. Нажмите «Начать сессию», чтобы мы могли поговорить.",
@@ -368,18 +571,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.user_data['history']) > MAX_HISTORY * 2:
             context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
-        # Добавляем оставшееся время к ответу
-        time_str = get_remaining_time(context)
-        reply_with_time = clean_reply
-        if time_str:
-            reply_with_time += time_str
+        # Разбиваем длинный ответ и отправляем по частям
+        parts = split_long_message(clean_reply)
+        for i, part in enumerate(parts):
+            if i == 0:
+                await update.message.reply_text(part, reply_markup=END_KEYBOARD)
+            else:
+                await update.message.reply_text(part)
+
+        # После отправки ответа обновляем таймер (новое сообщение под ответом)
+        await refresh_timer(update.effective_chat.id, context)
 
     except Exception as e:
         print(f"❌ Ошибка при запросе к DeepSeek: {e}")
-        reply_with_time = f"Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже.\n\nДетали: {e}"
+        error_message = f"Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже.\n\nДетали: {e}"
+        await update.message.reply_text(error_message, reply_markup=END_KEYBOARD)
+        # В случае ошибки тоже обновляем таймер? Можно, чтобы не терять отсчёт
+        await refresh_timer(update.effective_chat.id, context)
 
-    await update.message.reply_text(reply_with_time, reply_markup=END_KEYBOARD)
-    print("📤 Ответ отправлен пользователю")
 
 def main():
     print("🚀 Функция main() запущена!")
@@ -400,6 +609,7 @@ def main():
     # Запускаем бота
     print("🔄 Запускаем polling...")
     app.run_polling(timeout=50, drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     print("🐍 Скрипт bot.py запущен")
