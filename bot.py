@@ -38,7 +38,6 @@ openai.api_key = DEEPSEEK_API_KEY
 # =====================
 
 # ===== ПОРТ ДЛЯ RENDER =====
-# Render передаёт порт через переменную окружения PORT. По умолчанию (для локальной разработки) оставляем 8080.
 PORT = int(os.getenv('PORT', 8080))
 
 # ===== ЗАГРУЗКА ПРОМПТА ИЗ ВНЕШНЕГО ФАЙЛА =====
@@ -63,7 +62,7 @@ SESSION_DURATION = 30 * 60  # 30 минут
 COOLDOWN_SECONDS = 24 * 3600  # 24 часа
 TIMER_UPDATE_INTERVAL = 60  # обновлять каждую минуту
 
-# Завершающее сообщение в стиле Джеймса Холлиса (используется, если не удалось сгенерировать итог)
+# Завершающее сообщение в стиле Джеймса Холлиса
 END_MESSAGE = (
     "🕊️ Благодарю вас за доверие и мужество быть здесь. "
     "Помните: настоящая работа происходит в промежутках между сессиями — "
@@ -78,13 +77,9 @@ END_KEYBOARD = ReplyKeyboardMarkup([["Завершить сессию"]], resize
 # Глобальная переменная для доступа к приложению бота из веб-сервера
 bot_app = None
 
-
-# ===== ФУНКЦИЯ ДЛЯ РАЗБИВКИ ДЛИННЫХ СООБЩЕНИЙ =====
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def split_long_message(text: str, max_length: int = 4096) -> list[str]:
-    """
-    Разбивает текст на части, не превышающие max_length символов.
-    Старается делить по границам слов (пробелам).
-    """
+    """Разбивает длинный текст на части по границам слов."""
     if len(text) <= max_length:
         return [text]
     parts = []
@@ -99,9 +94,7 @@ def split_long_message(text: str, max_length: int = 4096) -> list[str]:
         text = text[split_index:].strip()
     return parts
 
-
 def get_remaining_time(context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Возвращает строку с оставшимся временем сессии или пустую строку, если сессия не активна."""
     if 'session_start_time' not in context.user_data:
         return ""
     elapsed = time.time() - context.user_data['session_start_time']
@@ -111,7 +104,6 @@ def get_remaining_time(context: ContextTypes.DEFAULT_TYPE) -> str:
     minutes = int(remaining // 60)
     seconds = int(remaining % 60)
     return f"\n\n⏳ Осталось: {minutes} мин {seconds} сек"
-
 
 # ===== ГЕНЕРАЦИЯ ИТОГОВОГО НАПУТСТВИЯ =====
 async def generate_session_summary(history: list) -> str:
@@ -143,131 +135,98 @@ async def generate_session_summary(history: list) -> str:
         print(f"❌ Ошибка при генерации итога: {e}")
         return None
 
-
-# ===== ФУНКЦИИ ДЛЯ ТАЙМЕРА =====
+# ===== ФУНКЦИИ ТАЙМЕРА =====
 async def update_timer_periodically(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
     print(f"🕒 [TIMER] Запущена задача для сообщения {message_id}")
     try:
         await asyncio.sleep(TIMER_UPDATE_INTERVAL)
         while True:
-            print(f"🕒 [TIMER] Цикл, message_id={message_id}")
             current_timer_id = context.user_data.get('timer_message_id')
             if current_timer_id != message_id:
-                print(f"🕒 [TIMER] message_id устарел: текущий {current_timer_id}, ожидался {message_id} → завершаемся")
                 break
 
             if 'session_start_time' not in context.user_data:
-                print("🕒 [TIMER] Сессия завершена, удаляем сообщение")
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except Exception as e:
-                    print(f"🕒 [TIMER] Не удалось удалить сообщение: {e}")
+                except:
+                    pass
                 break
 
             elapsed = time.time() - context.user_data['session_start_time']
             remaining = SESSION_DURATION - elapsed
             if remaining <= 0:
-                print("🕒 [TIMER] Время сессии истекло, удаляем сообщение")
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except Exception as e:
-                    print(f"🕒 [TIMER] Не удалось удалить сообщение: {e}")
+                except:
+                    pass
                 break
 
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
             timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
-            print(f"🕒 [TIMER] Обновляем: {timer_text}")
-
             try:
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=timer_text
                 )
-                print("🕒 [TIMER] Успешно обновлено")
             except Exception as e:
                 print(f"🕒 [TIMER] Не удалось обновить таймер: {e}")
                 break
-
             await asyncio.sleep(TIMER_UPDATE_INTERVAL)
     except asyncio.CancelledError:
-        print(f"🕒 [TIMER] Задача {message_id} отменена, удаляем сообщение")
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception as e:
-            print(f"🕒 [TIMER] Не удалось удалить сообщение при отмене: {e}")
+        except:
+            pass
         raise
 
-
 async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    print(f"🔄 [REFRESH] Запуск refresh_timer для чата {chat_id}")
     old_task = context.user_data.get('timer_task')
     if old_task and not old_task.done():
-        print("🔄 [REFRESH] Отменяем старую задачу")
         old_task.cancel()
         try:
             await old_task
-        except asyncio.CancelledError:
-            print("🔄 [REFRESH] Старая задача успешно отменена")
-        except Exception as e:
-            print(f"🔄 [REFRESH] Ошибка при ожидании отмены старой задачи: {e}")
+        except:
+            pass
 
     old_msg_id = context.user_data.get('timer_message_id')
     if old_msg_id:
-        print(f"🔄 [REFRESH] Удаляем старое сообщение {old_msg_id}")
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-            print("🔄 [REFRESH] Старое сообщение удалено")
-        except Exception as e:
-            print(f"🔄 [REFRESH] Ошибка при удалении старого сообщения: {e}")
+        except:
+            pass
 
     if 'session_start_time' in context.user_data:
         remaining = SESSION_DURATION - (time.time() - context.user_data['session_start_time'])
-        print(f"🔄 [REFRESH] Оставшееся время: {remaining} сек")
         if remaining > 0:
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
             timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
-            print(f"🔄 [REFRESH] Отправляем новое сообщение: {timer_text}")
             try:
                 timer_msg = await context.bot.send_message(chat_id=chat_id, text=timer_text)
-                print(f"🔄 [REFRESH] Сообщение отправлено, message_id = {timer_msg.message_id}")
+                context.user_data['timer_message_id'] = timer_msg.message_id
+                task = asyncio.create_task(
+                    update_timer_periodically(chat_id, timer_msg.message_id, context)
+                )
+                context.user_data['timer_task'] = task
             except Exception as e:
                 print(f"🔄 [REFRESH] Не удалось отправить сообщение таймера: {e}")
-                return
-
-            context.user_data['timer_message_id'] = timer_msg.message_id
-            task = asyncio.create_task(
-                update_timer_periodically(chat_id, timer_msg.message_id, context)
-            )
-            context.user_data['timer_task'] = task
-            print("🔄 [REFRESH] Запущена новая задача update_timer_periodically")
-        else:
-            print("🔄 [REFRESH] Сессия активна, но время истекло (remaining <= 0) — таймер не запускаем")
-    else:
-        print("🔄 [REFRESH] Сессия не активна (session_start_time отсутствует) — таймер не запускаем")
-
 
 async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     if 'session_start_time' not in context.user_data:
         return
-
     history = context.user_data.get('history', []).copy()
     await cleanup_session(context, clear_history=False, chat_id=chat_id)
-
     summary = await generate_session_summary(history) if history else None
     final_message = summary if summary else END_MESSAGE
-
     parts = split_long_message(final_message)
     for i, part in enumerate(parts):
         if i == 0:
             await context.bot.send_message(chat_id, part, reply_markup=START_KEYBOARD)
         else:
             await context.bot.send_message(chat_id, part)
-
     context.user_data['history'] = []
-
 
 # ===== ИНДИКАТОР ПЕЧАТИ =====
 async def send_typing_periodically(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -282,7 +241,6 @@ async def send_typing_periodically(chat_id: int, context: ContextTypes.DEFAULT_T
     except asyncio.CancelledError:
         pass
 
-
 # ===== ФУНКЦИЯ ДЛЯ КНОПКИ ОПЛАТЫ =====
 async def send_payment_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     product_link = TRIBUTE_PRODUCT_LINK
@@ -293,7 +251,6 @@ async def send_payment_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "💰 Для начала сессии необходима оплата.\n\n"
         "Нажмите кнопку ниже, чтобы перейти к защищённому платежу через Tribute. "
@@ -301,17 +258,15 @@ async def send_payment_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=reply_markup
     )
 
-
 # ===== ОСНОВНЫЕ ФУНКЦИИ СЕССИИ =====
 async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: bool = True, chat_id: int = None):
     was_active = False
-
     timer_task = context.user_data.get('timer_task')
     if timer_task and not timer_task.done():
         timer_task.cancel()
         try:
             await timer_task
-        except asyncio.CancelledError:
+        except:
             pass
         was_active = True
 
@@ -320,7 +275,7 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
         exp_task.cancel()
         try:
             await exp_task
-        except asyncio.CancelledError:
+        except:
             pass
 
     typing_task = context.user_data.get('typing_task')
@@ -328,7 +283,7 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
         typing_task.cancel()
         try:
             await typing_task
-        except asyncio.CancelledError:
+        except:
             pass
 
     if chat_id:
@@ -356,11 +311,8 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
 
     return was_active
 
-
 async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("🟢 Вызвана start_session")
-
-    # Проверка оплаты
     if not context.user_data.get('is_paid', False):
         await send_payment_button(update, context)
         return
@@ -403,44 +355,28 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Просто позвольте себе начать говорить, и посмотрим, куда нас это приведет.\n\n"
     )
     await update.message.reply_text(welcome_text, reply_markup=END_KEYBOARD)
-
     await refresh_timer(update.effective_chat.id, context)
-
     print("✅ Сессия начата")
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("📨 Получена команда /start")
     await start_session(update, context)
 
-
 async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("🔚 Получена команда /end или кнопка Завершить сессию")
     chat_id = update.effective_chat.id
-
     history = context.user_data.get('history', []).copy()
     await cleanup_session(context, clear_history=False, chat_id=chat_id)
-
     summary = await generate_session_summary(history) if history else None
     final_message = summary if summary else END_MESSAGE
-
     parts = split_long_message(final_message)
     for i, part in enumerate(parts):
         if i == 0:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=part,
-                reply_markup=START_KEYBOARD
-            )
+            await context.bot.send_message(chat_id=chat_id, text=part, reply_markup=START_KEYBOARD)
         else:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=part
-            )
-
+            await context.bot.send_message(chat_id=chat_id, text=part)
     context.user_data['history'] = []
     print("✅ Сессия завершена с итоговым сообщением")
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
@@ -450,7 +386,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("🟢 Нажата кнопка 'Начать сессию'")
         await start_session(update, context)
         return
-
     if user_message == "Завершить сессию":
         print("🔚 Нажата кнопка 'Завершить сессию'")
         await end(update, context)
@@ -472,7 +407,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'history' not in context.user_data:
         context.user_data['history'] = []
     context.user_data['history'].append({"role": "user", "content": user_message})
-
     if len(context.user_data['history']) > MAX_HISTORY * 2:
         context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
@@ -491,7 +425,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_reply = response.choices[0].message.content
 
         context.user_data['history'].append({"role": "assistant", "content": clean_reply})
-
         if len(context.user_data['history']) > MAX_HISTORY * 2:
             context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
@@ -513,24 +446,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"❌ Ошибка при запросе к DeepSeek: {e}")
-
         typing_task.cancel()
         try:
             await typing_task
         except asyncio.CancelledError:
             pass
         context.user_data.pop('typing_task', None)
-
         error_message = f"Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже.\n\nДетали: {e}"
         await update.message.reply_text(error_message, reply_markup=END_KEYBOARD)
         await refresh_timer(update.effective_chat.id, context)
 
-
 # ===== ВЕБ-СЕРВЕР ДЛЯ ПРИЁМА ВЕБХУКОВ ОТ TRIBUTE =====
+async def handle_root(request):
+    """Корневой маршрут для проверки работоспособности."""
+    return web.Response(text="Бот Джеймс Холлис работает!")
+
+async def handle_health(request):
+    """Маршрут для health checks от Render."""
+    return web.Response(text="OK")
+
 async def handle_tribute_webhook(request):
     global bot_app
     print("📩 Получен вебхук от Tribute")
-
     provided_api_key = request.headers.get('Api-Key')
     if not provided_api_key or provided_api_key != TRIBUTE_API_KEY:
         print("❌ Неверный или отсутствующий API-ключ в вебхуке")
@@ -539,23 +476,18 @@ async def handle_tribute_webhook(request):
     try:
         data = await request.json()
         print(f"📦 Данные вебхука: {data}")
-
         if data.get('name') == 'new_digital_product':
             payload = data.get('payload', {})
             telegram_user_id = payload.get('telegram_user_id')
-
             if not telegram_user_id:
                 print("❌ В вебхуке нет telegram_user_id")
                 return web.Response(status=400, text="Missing telegram_user_id")
-
             print(f"✅ Пользователь {telegram_user_id} оплатил товар!")
-
             if bot_app:
                 user_data = bot_app.user_data.get(int(telegram_user_id), {})
                 user_data['is_paid'] = True
                 bot_app.user_data[int(telegram_user_id)] = user_data
                 print(f"🏁 Флаг is_paid для пользователя {telegram_user_id} установлен.")
-
                 try:
                     await bot_app.bot.send_message(
                         chat_id=telegram_user_id,
@@ -566,9 +498,7 @@ async def handle_tribute_webhook(request):
             else:
                 print("❌ bot_app не инициализирован!")
                 return web.Response(status=500, text="Server error")
-
         return web.Response(status=200, text="OK")
-
     except json.JSONDecodeError:
         print("❌ Ошибка парсинга JSON")
         return web.Response(status=400, text="Invalid JSON")
@@ -576,23 +506,23 @@ async def handle_tribute_webhook(request):
         print(f"❌ Непредвиденная ошибка: {e}")
         return web.Response(status=500, text="Internal error")
 
-
 async def run_web_server():
-    """Запускает aiohttp сервер для приёма вебхуков с учётом PORT от Render."""
     app = web.Application()
+    # Маршруты для health checks
+    app.router.add_get('/', handle_root)
+    app.router.add_get('/health', handle_health)
+    # Маршрут для вебхуков
     app.router.add_post('/webhook/tribute', handle_tribute_webhook)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    # Используем PORT, полученный из переменной окружения (Render) или 8080 по умолчанию
     site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
     await site.start()
     print(f"🌐 Веб-сервер для вебхуков запущен на порту {PORT} (путь: /webhook/tribute)")
 
-
+# ===== ГЛАВНАЯ ФУНКЦИЯ =====
 def main():
     global bot_app
-
     print("🚀 Функция main() запущена!")
     print(f"🔑 TELEGRAM_TOKEN загружен: {'да' if TELEGRAM_TOKEN else 'нет'}")
     print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
@@ -601,21 +531,27 @@ def main():
     print(f"🔌 openai.api_base: {openai.api_base}")
     print(f"🌐 Порт для веб-сервера: {PORT}")
 
+    # Создаём приложение бота
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     bot_app = app
     print("✅ Application создан и сохранен глобально")
 
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("✅ Обработчики добавлены")
 
-    loop = asyncio.get_event_loop()
+    # Создаём новый цикл событий и устанавливаем его (важно для некоторых окружений)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Запускаем веб-сервер в фоне
     loop.create_task(run_web_server())
 
+    # Запускаем бота
     print("🔄 Запускаем polling...")
     app.run_polling(timeout=50, drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     print("🐍 Скрипт bot.py запущен")
