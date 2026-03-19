@@ -675,7 +675,7 @@ def main():
 
     # Запускаем бота с отключёнными обработчиками сигналов (чтобы работало в потоке)
     print("🔄 Запускаем polling с signal_handlers=False...")
-    app.run_polling(timeout=50, drop_pending_updates=True, signal_handlers=False)
+    app.run_polling(timeout=50, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
