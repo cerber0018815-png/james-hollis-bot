@@ -663,16 +663,16 @@ def main():
     print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
     print(f"🔌 openai.api_base: {openai.api_base}")
 
-    # 1. Сначала создаём Updater вручную
+    # 1. Правильно создаём Updater через билдер (для v20.8)
     from telegram.ext import Updater
-    updater = Updater(token=TELEGRAM_TOKEN, update_queue=None)
+    updater = Updater.builder().token(TELEGRAM_TOKEN).build()
 
-    # 2. Затем строим Application на основе этого Updater'а
+    # 2. Строим Application на основе этого Updater'а
     app = Application.builder().updater(updater).build()
 
     print("✅ Application создан")
 
-    # Добавляем обработчики (как и раньше)
+    # Добавляем обработчики (без изменений)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
