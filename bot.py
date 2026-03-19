@@ -662,22 +662,22 @@ def main():
     print(f"🔑 TELEGRAM_TOKEN загружен: {'да' if TELEGRAM_TOKEN else 'нет'}")
     print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
     print(f"🔌 openai.api_base: {openai.api_base}")
-    
-    # Создаём приложение
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # 1. Сначала создаём Updater вручную
+    from telegram.ext import Updater
+    updater = Updater(token=TELEGRAM_TOKEN, update_queue=None)
+
+    # 2. Затем строим Application на основе этого Updater'а
+    app = Application.builder().updater(updater).build()
+
     print("✅ Application создан")
 
-    # Добавляем обработчики
+    # Добавляем обработчики (как и раньше)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("✅ Обработчики добавлены")
 
-    # Запускаем бота с отключёнными обработчиками сигналов (чтобы работало в потоке)
+    # Запускаем polling с отключёнными сигналами
     print("🔄 Запускаем polling с signal_handlers=False...")
     app.run_polling(timeout=50, drop_pending_updates=True, signal_handlers=False)
-
-
-if __name__ == "__main__":
-    print("🐍 Скрипт bot.py запущен")
-    main()
