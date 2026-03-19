@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
+python-telegram-bot>=20.0,<21.0
 httpx>=0.25.2,<0.29.0
 openai==0.28.0
 python-dotenv
