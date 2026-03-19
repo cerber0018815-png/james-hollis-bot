@@ -663,12 +663,8 @@ def main():
     print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
     print(f"🔌 openai.api_base: {openai.api_base}")
 
-    # 1. Правильно создаём Updater через билдер (для v20.8)
-    from telegram.ext import Updater
-    updater = Updater.builder().token(TELEGRAM_TOKEN).build()
-
-    # 2. Строим Application на основе этого Updater'а
-    app = Application.builder().updater(updater).build()
+    # Создаём Application стандартным способом (без ручного создания Updater)
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     print("✅ Application создан")
 
@@ -678,6 +674,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("✅ Обработчики добавлены")
 
-    # Запускаем polling с отключёнными сигналами
+    # Запускаем polling с отключёнными сигналами — ЭТО КЛЮЧЕВОЙ МОМЕНТ!
     print("🔄 Запускаем polling с signal_handlers=False...")
     app.run_polling(timeout=50, drop_pending_updates=True, signal_handlers=False)
