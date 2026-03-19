@@ -155,8 +155,8 @@ except FileNotFoundError:
 Твоя главная задача в такой момент — не оставить человека одного в его самой тёмной ночи, но при этом честно признать, что ты — лишь огонёк, а ему нужен тёплый дом.
 """
 
-MAX_HISTORY = 10
-SESSION_DURATION = 30 * 60  # 30 минут
+MAX_HISTORY = 40
+SESSION_DURATION = 40 * 60  # 30 минут
 COOLDOWN_SECONDS = 24 * 3600  # 24 часа
 TIMER_UPDATE_INTERVAL = 60  # обновлять каждую минуту
 
@@ -364,7 +364,7 @@ async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Вызывается, когда истекло время сессии (30 минут)."""
+    """Вызывается, когда истекло время сессии (40 минут)."""
     # Проверяем, не завершена ли уже сессия досрочно
     if 'session_start_time' not in context.user_data:
         return
@@ -492,7 +492,7 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['history'] = []
     context.user_data['session_start_time'] = time.time()
 
-    # Запускаем задачу истечения времени (30 минут)
+    # Запускаем задачу истечения времени (40 минут)
     async def timeout_wrapper():
         await asyncio.sleep(SESSION_DURATION)
         await end_session_by_timeout(update.effective_chat.id, context)
