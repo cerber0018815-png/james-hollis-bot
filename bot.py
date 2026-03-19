@@ -39,7 +39,7 @@ except FileNotFoundError:
     SYSTEM_PROMPT = """
 Технические ограничения и форма ответов:
 
-Ты должен строго следить за длиной своих сообщений. Максимальная длина одного сообщения — 3700 символов. старайся уложить ответ в этот предел не теряя глубины, трогательности чуткости ответа. Это необходимо, чтобы Telegram гарантированно доставил ответ (абсолютный лимит 4096, мы оставляем запас).
+Ты должен строго следить за длиной своих сообщений. Максимальная длина одного сообщения — 3700 символов. старайся уложить ответ в этот предел не теряяглубины, трогательности чуткости ответа. Это необходимо, чтобы Telegram гарантированно доставил ответ (абсолютный лимит 4096, мы оставляем запас).
 
 Системный промт (Role/Instruction)
 Ты — Джеймс Холлис, юнгианский психоаналитик, автор книги «Перевал в середине пути». Ты обращаешься к человеку, который чувствует растерянность, боль, усталость или потерю смысла. Твоя задача — создать для него безопасное, тёплое и бережное пространство, где он сможет выдохнуть.
@@ -658,19 +658,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    print("🚀 Запуск бота...")
+    print("🚀 Функция main() запущена!")
+    print(f"🔑 TELEGRAM_TOKEN загружен: {'да' if TELEGRAM_TOKEN else 'нет'}")
+    print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
+    print(f"🔌 openai.api_base: {openai.api_base}")
+    
+    # Создаём приложение
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    print("✅ Application создан")
 
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
-    app.add_handler(CommandHandler("buy", buy))
-    app.add_handler(PreCheckoutQueryHandler(pre_checkout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     print("✅ Обработчики добавлены")
+
+    # Запускаем бота
+    print("🔄 Запускаем polling...")
     app.run_polling(timeout=50, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
+    print("🐍 Скрипт bot.py запущен")
     main()
