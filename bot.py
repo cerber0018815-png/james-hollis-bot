@@ -658,22 +658,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    print("🚀 Функция main() запущена!")
-    print(f"🔑 TELEGRAM_TOKEN загружен: {'да' if TELEGRAM_TOKEN else 'нет'}")
-    print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
-    print(f"🔌 openai.api_base: {openai.api_base}")
-
-    # Создаём Application стандартным способом (без ручного создания Updater)
+    print("🚀 Запуск бота...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    print("✅ Application создан")
-
-    # Добавляем обработчики (без изменений)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
+    app.add_handler(CommandHandler("buy", buy))
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Обработчики добавлены")
 
-    # Запускаем polling с отключёнными сигналами — ЭТО КЛЮЧЕВОЙ МОМЕНТ!
-    print("🔄 Запускаем polling с signal_handlers=False...")
-    app.run_polling(timeout=50, drop_pending_updates=True, signal_handlers=False)
+    print("✅ Обработчики добавлены")
+    app.run_polling(timeout=50, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
