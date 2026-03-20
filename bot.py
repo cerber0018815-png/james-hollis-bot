@@ -556,19 +556,12 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выводит последние 10 отзывов (только для администратора)."""
+    """Выводит последние 10 отзывов (только для администратора, чей ID указан ниже)."""
     user_id = update.effective_user.id
-    if not AUTHOR_CHAT_ID:
-        await update.message.reply_text("Функция просмотра отзывов не настроена.")
-        return
+    # ⚠️ Временно указываем ID администратора напрямую (замените на свой!)
+    ADMIN_ID = 123456789  # <--- ВСТАВЬТЕ СВОЙ TELEGRAM ID
 
-    try:
-        author_id = int(AUTHOR_CHAT_ID.strip())
-    except ValueError:
-        await update.message.reply_text("Ошибка конфигурации: AUTHOR_CHAT_ID не является числом.")
-        return
-
-    if user_id != author_id:
+    if user_id != ADMIN_ID:
         await update.message.reply_text("У вас нет прав для просмотра отзывов.")
         return
 
@@ -591,11 +584,9 @@ async def view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = "📋 Последние 10 отзывов:\n\n"
         for row in rows:
             user_id, username, text, ts = row
-            # ts в Unix-времени, преобразуем в читаемый вид
             dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
             message += f"🕐 {dt}\n👤 @{username} (id: {user_id})\n💬 {text}\n\n---\n\n"
 
-        # Разбиваем, если слишком длинное
         for part in split_long_message(message, 4096):
             await update.message.reply_text(part)
     except Exception as e:
