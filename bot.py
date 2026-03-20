@@ -585,7 +585,7 @@ async def view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for row in rows:
             user_id, username, text, ts = row
             dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-            message += f"🕐 {dt}\n👤 @{username} (id: {user_id})\n💬 {text}\n\n---\n\n"
+            message += f"🕐 {dt}\n💬 {text}\n\n---\n\n"
 
         for part in split_long_message(message, 4096):
             await update.message.reply_text(part)
