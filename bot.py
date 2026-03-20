@@ -663,7 +663,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_feedback'):
         feedback_text = user_message
         user_id = update.effective_user.id
-        username = update.effective_user.username
+        username = update.effective_user.username or "без username"
 
         if AUTHOR_CHAT_ID:
             try:
@@ -671,8 +671,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=int(AUTHOR_CHAT_ID),
                     text=f"📬 Новый отзыв:\n\n{feedback_text}"
                 )
+                print(f"✅ Отзыв успешно отправлен автору (chat_id: {AUTHOR_CHAT_ID})")
             except Exception as e:
-                print(f"Не удалось отправить отзыв автору: {e}")
+                print(f"❌ Ошибка при отправке отзыва автору: {e}")
+                # Дополнительно можно сохранить отзыв в логах или БД
+        else:
+            print("⚠️ Переменная AUTHOR_CHAT_ID не задана, отзыв не отправлен")
 
         await update.message.reply_text(
             "Спасибо за ваш отзыв! Он очень важен для меня.",
