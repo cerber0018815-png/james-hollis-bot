@@ -3,8 +3,8 @@ import time
 import openai
 import sys
 import os
-import json
 import sqlite3
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -34,19 +34,30 @@ openai.api_key = DEEPSEEK_API_KEY
 DB_PATH = "bot_data.db"
 
 def init_db():
-    """Создаёт таблицу users (только last_session_end)."""
+    """Создаёт таблицы users и feedback."""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        # Таблица пользователей
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 last_session_end REAL DEFAULT 0
             )
         ''')
+        # Таблица отзывов
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                feedback_text TEXT,
+                created_at REAL DEFAULT (strftime('%s', 'now'))
+            )
+        ''')
         conn.commit()
         conn.close()
-        print("✅ База данных инициализирована")
+        print("✅ База данных инициализирована (включая таблицу feedback)")
     except Exception as e:
         print(f"❌ Ошибка инициализации БД: {e}")
 
@@ -80,6 +91,21 @@ def save_last_session_end(user_id: int, last_session_end: float):
         conn.close()
     except Exception as e:
         print(f"❌ Ошибка записи в БД для user {user_id}: {e}")
+
+def save_feedback(user_id: int, username: str, feedback_text: str):
+    """Сохраняет отзыв в базу данных."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('''
+            INSERT INTO feedback (user_id, username, feedback_text)
+            VALUES (?, ?, ?)
+        ''', (user_id, username, feedback_text))
+        conn.commit()
+        conn.close()
+        print(f"✅ Отзыв от user {user_id} сохранён в БД")
+    except Exception as e:
+        print(f"❌ Ошибка сохранения отзыва в БД: {e}")
 
 async def ensure_user_data(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     """Загружает last_session_end из БД в context.user_data, если его там нет."""
@@ -216,7 +242,7 @@ except FileNotFoundError:
 
 MAX_HISTORY = 30
 SESSION_DURATION = 40 * 60  # 40 минут
-COOLDOWN_SECONDS = 12 * 3600  # 15 минут
+COOLDOWN_SECONDS = 15 * 60  # 15 минут
 TIMER_UPDATE_INTERVAL = 60
 
 END_MESSAGE = (
@@ -529,6 +555,54 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ask_feedback(update.effective_chat.id, context)
 
 
+async def view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выводит последние 10 отзывов (только для администратора)."""
+    user_id = update.effective_user.id
+    if not AUTHOR_CHAT_ID:
+        await update.message.reply_text("Функция просмотра отзывов не настроена.")
+        return
+
+    try:
+        author_id = int(AUTHOR_CHAT_ID.strip())
+    except ValueError:
+        await update.message.reply_text("Ошибка конфигурации: AUTHOR_CHAT_ID не является числом.")
+        return
+
+    if user_id != author_id:
+        await update.message.reply_text("У вас нет прав для просмотра отзывов.")
+        return
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''
+            SELECT user_id, username, feedback_text, created_at
+            FROM feedback
+            ORDER BY created_at DESC
+            LIMIT 10
+        ''')
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            await update.message.reply_text("Пока нет отзывов.")
+            return
+
+        message = "📋 Последние 10 отзывов:\n\n"
+        for row in rows:
+            user_id, username, text, ts = row
+            # ts в Unix-времени, преобразуем в читаемый вид
+            dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+            message += f"🕐 {dt}\n👤 @{username} (id: {user_id})\n💬 {text}\n\n---\n\n"
+
+        # Разбиваем, если слишком длинное
+        for part in split_long_message(message, 4096):
+            await update.message.reply_text(part)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при получении отзывов: {e}")
+        print(f"❌ Ошибка в view_feedback: {e}")
+
+
 # ===== ОСНОВНЫЕ ФУНКЦИИ СЕССИИ =====
 async def begin_session(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Запускает новую сессию (уже после проверок)."""
@@ -665,19 +739,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         username = update.effective_user.username or "без username"
 
+        # Сохраняем в БД
+        save_feedback(user_id, username, feedback_text)
+
+        # Пытаемся отправить автору, если указан
         if AUTHOR_CHAT_ID:
             try:
+                author_id = int(AUTHOR_CHAT_ID.strip())
                 await context.bot.send_message(
-                    chat_id=int(AUTHOR_CHAT_ID),
-                    text=f"📬 Новый отзыв:\n\n{feedback_text}"
+                    chat_id=author_id,
+                    text=f"📬 Новый отзыв от @{username} (id: {user_id}):\n\n{feedback_text}"
                 )
-                print(f"✅ Отзыв успешно отправлен автору (chat_id: {AUTHOR_CHAT_ID})")
+                print(f"✅ Отзыв отправлен автору (chat_id: {author_id})")
             except Exception as e:
                 print(f"❌ Ошибка при отправке отзыва автору: {e}")
-                # Дополнительно можно сохранить отзыв в логах или БД
         else:
-            print("⚠️ Переменная AUTHOR_CHAT_ID не задана, отзыв не отправлен")
+            print("⚠️ AUTHOR_CHAT_ID не задан, отзыв не отправлен автору")
 
+        # Подтверждение пользователю
         await update.message.reply_text(
             "Спасибо за ваш отзыв! Он очень важен для меня.",
             reply_markup=START_KEYBOARD
@@ -768,6 +847,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
     app.add_handler(CommandHandler("feedback", feedback_command))
+    app.add_handler(CommandHandler("view_feedback", view_feedback))
     app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
