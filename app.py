@@ -1,6 +1,6 @@
-python
 import os
 import sys
+import multiprocessing
 import threading
 from flask import Flask
 from bot import main as run_bot
@@ -13,34 +13,35 @@ def index():
 
 @app.route('/health')
 def health():
+    # Проверка здоровья – можно всегда отвечать OK,
+    # так как при падении бота процесс мониторинга завершит родителя.
     return "OK"
 
-def start_bot():
-    """Функция, выполняемая в потоке для запуска бота."""
+def start_bot_process():
+    """Функция, выполняемая в дочернем процессе."""
     try:
         run_bot()
     except Exception as e:
         print(f"❌ Критическая ошибка в боте: {e}")
         sys.stdout.flush()
-        # Принудительно завершаем процесс, чтобы Render перезапустил
-        os._exit(1)
+        sys.exit(1)  # Завершаем процесс с ошибкой
 
-def monitor_thread(bot_thread):
-    """Ожидает завершения потока бота и завершает процесс."""
-    bot_thread.join()
-    print("⚠️ Поток бота завершился. Завершаем процесс.")
+def monitor_process(proc):
+    """Ожидает завершения дочернего процесса и завершает родителя."""
+    proc.join()
+    print("⚠️ Дочерний процесс бота завершился. Завершаем родительский процесс.")
     sys.stdout.flush()
-    os._exit(1)
+    os._exit(1)  # Принудительное завершение родителя → Render перезапустит сервис
 
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=start_bot, daemon=False)
-    bot_thread.start()
+    # Запускаем бота в отдельном процессе (не в потоке)
+    bot_process = multiprocessing.Process(target=start_bot_process, daemon=False)
+    bot_process.start()
 
-    # Мониторим поток бота
-    monitor = threading.Thread(target=monitor_thread, args=(bot_thread,), daemon=True)
-    monitor.start()
+    # Поток для мониторинга дочернего процесса (демонический, чтобы не блокировать остановку)
+    monitor_thread = threading.Thread(target=monitor_process, args=(bot_process,), daemon=True)
+    monitor_thread.start()
 
-    # Запускаем Flask
+    # Запускаем веб-сервер Flask на порту, указанном Render
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=port)
