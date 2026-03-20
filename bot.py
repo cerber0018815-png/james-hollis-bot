@@ -559,7 +559,7 @@ async def view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Выводит последние 10 отзывов (только для администратора, чей ID указан ниже)."""
     user_id = update.effective_user.id
     # ⚠️ Временно указываем ID администратора напрямую (замените на свой!)
-    ADMIN_ID = 123456789  # <--- ВСТАВЬТЕ СВОЙ TELEGRAM ID
+    ADMIN_ID = 928589977  # <--- ВСТАВЬТЕ СВОЙ TELEGRAM ID
 
     if user_id != ADMIN_ID:
         await update.message.reply_text("У вас нет прав для просмотра отзывов.")
