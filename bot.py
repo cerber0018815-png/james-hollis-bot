@@ -3,39 +3,98 @@ import time
 import openai
 import sys
 import os
+import json
+import sqlite3
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, CallbackQueryHandler
+)
 
-# Загружаем переменные окружения из файла .env (для локальной разработки)
+# Загружаем переменные окружения
 load_dotenv()
 
 # ===== НАСТРОЙКИ =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+AUTHOR_CHAT_ID = os.getenv('AUTHOR_CHAT_ID')  # Telegram ID администратора для отзывов
 
-# Проверка наличия ключей
 if not TELEGRAM_TOKEN or not DEEPSEEK_API_KEY:
-    print("❌ Ошибка: TELEGRAM_TOKEN или DEEPSEEK_API_KEY не найдены в переменных окружения!")
-    print(f"TELEGRAM_TOKEN: {'задан' if TELEGRAM_TOKEN else 'не задан'}")
-    print(f"DEEPSEEK_API_KEY: {'задан' if DEEPSEEK_API_KEY else 'не задан'}")
+    print("❌ Ошибка: TELEGRAM_TOKEN или DEEPSEEK_API_KEY не найдены!")
     sys.exit(1)
 else:
-    print("✅ Переменные окружения успешно загружены.")
+    print("✅ Переменные окружения загружены.")
 
 openai.api_base = "https://api.deepseek.com/v1"
 openai.api_key = DEEPSEEK_API_KEY
 # =====================
 
-# ===== ЗАГРУЗКА ПРОМПТА ИЗ ВНЕШНЕГО ФАЙЛА =====
+# ===== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ =====
+DB_PATH = "bot_data.db"
+
+def init_db():
+    """Создаёт таблицу users (только last_session_end)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                last_session_end REAL DEFAULT 0
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        print("✅ База данных инициализирована")
+    except Exception as e:
+        print(f"❌ Ошибка инициализации БД: {e}")
+
+init_db()
+
+def get_last_session_end(user_id: int) -> float:
+    """Возвращает время последней сессии пользователя."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT last_session_end FROM users WHERE user_id = ?', (user_id,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception as e:
+        print(f"❌ Ошибка чтения из БД для user {user_id}: {e}")
+        return 0
+
+def save_last_session_end(user_id: int, last_session_end: float):
+    """Сохраняет время последней сессии пользователя."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('''
+            INSERT INTO users (user_id, last_session_end)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_session_end = excluded.last_session_end
+        ''', (user_id, last_session_end))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка записи в БД для user {user_id}: {e}")
+
+async def ensure_user_data(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Загружает last_session_end из БД в context.user_data, если его там нет."""
+    if 'last_session_end' not in context.user_data:
+        context.user_data['last_session_end'] = get_last_session_end(user_id)
+# ======================================
+
+# ===== ЗАГРУЗКА ПРОМПТА =====
 PROMPT_FILE = "prompt.txt"
 try:
     with open(PROMPT_FILE, "r", encoding="utf-8") as f:
         SYSTEM_PROMPT = f.read()
-    print(f"✅ Промпт успешно загружен из файла {PROMPT_FILE}")
+    print(f"✅ Промпт загружен из {PROMPT_FILE}")
 except FileNotFoundError:
-    print(f"⚠️ Файл {PROMPT_FILE} не найден. Использую встроенный промпт по умолчанию.")
-    # Встроенный промпт (на случай отсутствия файла)
+    print("⚠️ Файл prompt.txt не найден. Использую встроенный промпт (заглушка).")
     SYSTEM_PROMPT = """
 Технические ограничения и форма ответов:
 
@@ -155,12 +214,11 @@ except FileNotFoundError:
 Твоя главная задача в такой момент — не оставить человека одного в его самой тёмной ночи, но при этом честно признать, что ты — лишь огонёк, а ему нужен тёплый дом.
 """
 
-MAX_HISTORY = 40
-SESSION_DURATION = 40 * 60  # 30 минут
-COOLDOWN_SECONDS = 24 * 3600  # 24 часа
-TIMER_UPDATE_INTERVAL = 60  # обновлять каждую минуту
+MAX_HISTORY = 30
+SESSION_DURATION = 40 * 60  # 40 минут
+COOLDOWN_SECONDS = 15 * 60  # 15 минут
+TIMER_UPDATE_INTERVAL = 60
 
-# Завершающее сообщение в стиле Джеймса Холлиса (используется, если не удалось сгенерировать итог)
 END_MESSAGE = (
     "🕊️ Благодарю вас за доверие и мужество быть здесь. "
     "Помните: настоящая работа происходит в промежутках между сессиями — "
@@ -168,17 +226,14 @@ END_MESSAGE = (
     "Носите это с собой до нашей следующей встречи. Берегите себя."
 )
 
-# Клавиатуры
+# Клавиатуры – только "Начать сессию" и "Завершить сессию"
 START_KEYBOARD = ReplyKeyboardMarkup([["Начать сессию"]], resize_keyboard=True)
 END_KEYBOARD = ReplyKeyboardMarkup([["Завершить сессию"]], resize_keyboard=True)
 
 
-# ===== ФУНКЦИЯ ДЛЯ РАЗБИВКИ ДЛИННЫХ СООБЩЕНИЙ =====
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def split_long_message(text: str, max_length: int = 4096) -> list[str]:
-    """
-    Разбивает текст на части, не превышающие max_length символов.
-    Старается делить по границам слов (пробелам).
-    """
+    """Разбивает длинный текст по частям."""
     if len(text) <= max_length:
         return [text]
     parts = []
@@ -186,40 +241,19 @@ def split_long_message(text: str, max_length: int = 4096) -> list[str]:
         if len(text) <= max_length:
             parts.append(text)
             break
-        # Ищем последний пробел в пределах лимита
         split_index = text.rfind(' ', 0, max_length)
-        if split_index == -1:  # пробелов нет – режем по max_length
+        if split_index == -1:
             split_index = max_length
         parts.append(text[:split_index].strip())
         text = text[split_index:].strip()
     return parts
 
 
-def get_remaining_time(context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Возвращает строку с оставшимся временем сессии или пустую строку, если сессия не активна."""
-    if 'session_start_time' not in context.user_data:
-        return ""
-    elapsed = time.time() - context.user_data['session_start_time']
-    remaining = max(0, SESSION_DURATION - elapsed)
-    if remaining <= 0:
-        return ""
-    minutes = int(remaining // 60)
-    seconds = int(remaining % 60)
-    return f"\n\n⏳ Осталось: {minutes} мин {seconds} сек"
-
-
-# ===== ИЗМЕНЕНО: генерация итогового напутствия =====
 async def generate_session_summary(history: list) -> str:
-    """
-    Генерирует завершающее поддерживающее сообщение на основе истории,
-    используя тот же системный промпт (Джеймс Холлис).
-    Добавляет в историю запрос от пользователя написать напутствие.
-    """
+    """Генерирует итоговое напутствие через DeepSeek."""
     if not history:
         return None
-    # Копируем историю, чтобы не изменять оригинал
     history_copy = history.copy()
-    # Добавляем сообщение от пользователя с просьбой подвести итог и дать напутствие
     history_copy.append({
         "role": "user",
         "content": (
@@ -230,8 +264,7 @@ async def generate_session_summary(history: list) -> str:
     })
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history_copy
     try:
-        print("🔄 Генерация итогового сообщения...")
-        # Используем asyncio.to_thread для асинхронного выполнения
+        print("🔄 Генерация итога...")
         response = await asyncio.to_thread(
             openai.ChatCompletion.create,
             model="deepseek-chat",
@@ -240,146 +273,165 @@ async def generate_session_summary(history: list) -> str:
             temperature=1
         )
         summary = response.choices[0].message.content
-        print("✅ Итоговое сообщение получено")
+        print("✅ Итог получен")
         return summary
     except Exception as e:
         print(f"❌ Ошибка при генерации итога: {e}")
         return None
 
 
-# ===== ФУНКЦИИ ДЛЯ ТАЙМЕРА (С ОТЛАДКОЙ) =====
+# ===== ГЕНЕРАЦИЯ ПРИВЕТСТВИЯ =====
+async def generate_welcome_message() -> str:
+    """Генерирует уникальное приветствие через DeepSeek."""
+    try:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "Пользователь готов начать разговор. Напиши тёплое, располагающее приветствие, которое пригласит его поделиться тем, что его беспокоит. Сохрани свой обычный тон. Не используй Markdown, просто текст."}
+        ]
+        response = await asyncio.to_thread(
+            openai.ChatCompletion.create,
+            model="deepseek-chat",
+            messages=messages,
+            max_tokens=800,
+            temperature=1
+        )
+        welcome = response.choices[0].message.content.strip()
+        return welcome
+    except Exception as e:
+        print(f"❌ Ошибка при генерации приветствия: {e}")
+        return None
+
+
+# ===== ФУНКЦИИ ТАЙМЕРА =====
 async def update_timer_periodically(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
     print(f"🕒 [TIMER] Запущена задача для сообщения {message_id}")
     try:
-        # Ждём первую минуту, чтобы избежать ошибки "Message is not modified"
         await asyncio.sleep(TIMER_UPDATE_INTERVAL)
-        
         while True:
-            print(f"🕒 [TIMER] Цикл, message_id={message_id}")
-            # Проверяем, актуально ли ещё это сообщение
             current_timer_id = context.user_data.get('timer_message_id')
             if current_timer_id != message_id:
-                print(f"🕒 [TIMER] message_id устарел: текущий {current_timer_id}, ожидался {message_id} → завершаемся")
                 break
 
-            # Проверяем, активна ли сессия
             if 'session_start_time' not in context.user_data:
-                print("🕒 [TIMER] Сессия завершена, удаляем сообщение")
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except Exception as e:
-                    print(f"🕒 [TIMER] Не удалось удалить сообщение: {e}")
+                except:
+                    pass
                 break
 
             elapsed = time.time() - context.user_data['session_start_time']
             remaining = SESSION_DURATION - elapsed
             if remaining <= 0:
-                print("🕒 [TIMER] Время сессии истекло, удаляем сообщение")
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except Exception as e:
-                    print(f"🕒 [TIMER] Не удалось удалить сообщение: {e}")
+                except:
+                    pass
                 break
 
-            # Формируем текст таймера
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
             timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
-            print(f"🕒 [TIMER] Обновляем: {timer_text}")
 
-            # Редактируем сообщение
             try:
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=timer_text
                 )
-                print("🕒 [TIMER] Успешно обновлено")
             except Exception as e:
                 print(f"🕒 [TIMER] Не удалось обновить таймер: {e}")
                 break
 
             await asyncio.sleep(TIMER_UPDATE_INTERVAL)
     except asyncio.CancelledError:
-        print(f"🕒 [TIMER] Задача {message_id} отменена, удаляем сообщение")
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception as e:
-            print(f"🕒 [TIMER] Не удалось удалить сообщение при отмене: {e}")
+        except:
+            pass
         raise
 
 
 async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    print(f"🔄 [REFRESH] Запуск refresh_timer для чата {chat_id}")
-    # Отменяем предыдущую задачу
+    """Обновляет сообщение с таймером."""
     old_task = context.user_data.get('timer_task')
     if old_task and not old_task.done():
-        print("🔄 [REFRESH] Отменяем старую задачу")
         old_task.cancel()
         try:
             await old_task
         except asyncio.CancelledError:
-            print("🔄 [REFRESH] Старая задача успешно отменена")
-        except Exception as e:
-            print(f"🔄 [REFRESH] Ошибка при ожидании отмены старой задачи: {e}")
+            pass
 
-    # Удаляем предыдущее сообщение таймера
     old_msg_id = context.user_data.get('timer_message_id')
     if old_msg_id:
-        print(f"🔄 [REFRESH] Удаляем старое сообщение {old_msg_id}")
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-            print("🔄 [REFRESH] Старое сообщение удалено")
-        except Exception as e:
-            print(f"🔄 [REFRESH] Ошибка при удалении старого сообщения: {e}")
+        except:
+            pass
 
-    # Если сессия ещё активна, отправляем новое сообщение и запускаем задачу
     if 'session_start_time' in context.user_data:
         remaining = SESSION_DURATION - (time.time() - context.user_data['session_start_time'])
-        print(f"🔄 [REFRESH] Оставшееся время: {remaining} сек")
         if remaining > 0:
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
             timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
-            print(f"🔄 [REFRESH] Отправляем новое сообщение: {timer_text}")
             try:
                 timer_msg = await context.bot.send_message(chat_id=chat_id, text=timer_text)
-                print(f"🔄 [REFRESH] Сообщение отправлено, message_id = {timer_msg.message_id}")
             except Exception as e:
-                print(f"🔄 [REFRESH] Не удалось отправить сообщение таймера: {e}")
+                print(f"🔄 [REFRESH] Не удалось отправить таймер: {e}")
                 return
 
             context.user_data['timer_message_id'] = timer_msg.message_id
-
-            # Запускаем новую задачу
             task = asyncio.create_task(
                 update_timer_periodically(chat_id, timer_msg.message_id, context)
             )
             context.user_data['timer_task'] = task
-            print("🔄 [REFRESH] Запущена новая задача update_timer_periodically")
-        else:
-            print("🔄 [REFRESH] Сессия активна, но время истекло (remaining <= 0) — таймер не запускаем")
-    else:
-        print("🔄 [REFRESH] Сессия не активна (session_start_time отсутствует) — таймер не запускаем")
 
 
+async def send_typing_periodically(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Имитация печати."""
+    try:
+        while True:
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            except:
+                break
+            await asyncio.sleep(4)
+    except asyncio.CancelledError:
+        pass
+
+
+async def stop_typing(typing_task: asyncio.Task):
+    """Отменяет задачу имитации печати."""
+    if typing_task and not typing_task.done():
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+
+
+# ===== ФУНКЦИИ ЗАВЕРШЕНИЯ СЕССИИ =====
 async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Вызывается, когда истекло время сессии (40 минут)."""
-    # Проверяем, не завершена ли уже сессия досрочно
+    """Завершение сессии по истечении 40 минут."""
     if 'session_start_time' not in context.user_data:
         return
 
-    # Сохраняем историю
     history = context.user_data.get('history', []).copy()
+    user_id = context.user_data.get('user_id')
 
-    # Завершаем сессию (без очистки истории)
     await cleanup_session(context, clear_history=False, chat_id=chat_id)
 
-    # Генерируем итог
-    summary = await generate_session_summary(history) if history else None
+    # Запускаем имитацию печати на время генерации итога
+    typing_task = asyncio.create_task(
+        send_typing_periodically(chat_id, context)
+    )
+    try:
+        summary = await generate_session_summary(history) if history else None
+    finally:
+        await stop_typing(typing_task)
+
     final_message = summary if summary else END_MESSAGE
 
-    # Отправляем итог
     parts = split_long_message(final_message)
     for i, part in enumerate(parts):
         if i == 0:
@@ -387,33 +439,19 @@ async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYP
         else:
             await context.bot.send_message(chat_id, part)
 
-    # Очищаем историю окончательно
+    if user_id:
+        now = time.time()
+        context.user_data['last_session_end'] = now
+        save_last_session_end(user_id, now)
+
     context.user_data['history'] = []
 
-
-# ===== НОВАЯ ФУНКЦИЯ: индикатор печати =====
-async def send_typing_periodically(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет действие 'typing' сразу, затем каждые 4 секунды, пока не будет отменена."""
-    try:
-        while True:
-            try:
-                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            except Exception as e:
-                # Если не удалось отправить (например, чат заблокирован), просто выходим
-                print(f"Ошибка при отправке typing: {e}")
-                break
-            await asyncio.sleep(4)
-    except asyncio.CancelledError:
-        # Задача отменена — корректно завершаемся
-        pass
+    # Предлагаем оставить отзыв
+    await ask_feedback(chat_id, context)
 
 
-# ===== ОСНОВНЫЕ ФУНКЦИИ СЕССИИ =====
 async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: bool = True, chat_id: int = None):
-    """Завершает текущую сессию: отменяет все задачи, записывает время, опционально очищает историю."""
-    was_active = False
-
-    # Отменяем задачу обновления таймера
+    """Завершает сессию, отменяет задачи."""
     timer_task = context.user_data.get('timer_task')
     if timer_task and not timer_task.done():
         timer_task.cancel()
@@ -421,9 +459,7 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
             await timer_task
         except asyncio.CancelledError:
             pass
-        was_active = True
 
-    # Отменяем задачу истечения сессии
     exp_task = context.user_data.get('expiration_task')
     if exp_task and not exp_task.done():
         exp_task.cancel()
@@ -432,7 +468,6 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
         except asyncio.CancelledError:
             pass
 
-    # Отменяем задачу индикатора печати, если есть
     typing_task = context.user_data.get('typing_task')
     if typing_task and not typing_task.done():
         typing_task.cancel()
@@ -441,7 +476,6 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
         except asyncio.CancelledError:
             pass
 
-    # Если передан chat_id, удаляем последнее сообщение таймера
     if chat_id:
         timer_msg_id = context.user_data.get('timer_message_id')
         if timer_msg_id:
@@ -451,32 +485,109 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
                 pass
 
     if 'history' in context.user_data and context.user_data['history']:
-        was_active = True
-
-    if was_active:
         context.user_data['last_session_end'] = time.time()
 
     if clear_history:
         context.user_data['history'] = []
 
-    # Очищаем все временные ключи
     context.user_data.pop('timer_task', None)
     context.user_data.pop('timer_message_id', None)
     context.user_data.pop('expiration_task', None)
     context.user_data.pop('typing_task', None)
     context.user_data.pop('session_start_time', None)
 
-    return was_active
+
+# ===== ФУНКЦИИ ДЛЯ ОТЗЫВОВ =====
+async def ask_feedback(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет inline‑клавиатуру для запроса отзыва."""
+    keyboard = [
+        [InlineKeyboardButton("📝 Оставить отзыв", callback_data="feedback_yes")],
+        [InlineKeyboardButton("❌ Пропустить", callback_data="feedback_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Спасибо Вам за разговор. Вы можете поделиться впечатлениями если захотите — это поможет мне становиться лучше.",
+        reply_markup=reply_markup
+    )
+
+
+async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает нажатия на inline-кнопки отзыва."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "feedback_yes":
+        context.user_data['awaiting_feedback'] = True
+        await query.edit_message_text("Пожалуйста, напишите Ваш отзыв одним сообщением.")
+    else:  # feedback_no
+        await query.edit_message_text("Если захотите оставить отзыв позже, просто напишите /feedback.")
+
+
+async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /feedback для самостоятельного вызова."""
+    await ask_feedback(update.effective_chat.id, context)
+
+
+# ===== ОСНОВНЫЕ ФУНКЦИИ СЕССИИ =====
+async def begin_session(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Запускает новую сессию (уже после проверок)."""
+    context.user_data['user_id'] = user_id
+    context.user_data['history'] = []
+    context.user_data['session_start_time'] = time.time()
+
+    async def timeout_wrapper():
+        await asyncio.sleep(SESSION_DURATION)
+        await end_session_by_timeout(chat_id, context)
+
+    context.user_data['expiration_task'] = asyncio.create_task(timeout_wrapper())
+
+    # Запускаем имитацию печати на время генерации приветствия
+    typing_task = asyncio.create_task(
+        send_typing_periodically(chat_id, context)
+    )
+    try:
+        welcome_text = await generate_welcome_message()
+        if not welcome_text:
+            welcome_text = (
+                "Я рад, что вы пришли. Правда. Знаете, самое трудное в этом путешествии, "
+                "которое мы называем жизнью, — это решимость сделать первый шаг. Прийти и сказать: "
+                "«Мне больно, и я больше не понимаю, кто я». Это уже акт огромного мужества.\n\n"
+                "Мы не знаем друг друга, и это пространство — особенное. Здесь нет места для светских "
+                "условностей или ролей, которые мы играем на работе и дома. Здесь мы можем поговорить "
+                "о том, что обычно остается за кадром.\n\n"
+                "Я не буду давать вам готовых ответов. У меня их нет. Но у меня есть вопросы, которые, "
+                "возможно, помогут нам услышать тихий голос вашей собственной души. Потому что, как я часто "
+                "говорю, невроз — это просто страдания души, которая не нашла своего смысла. Ваши симптомы — "
+                "это не враги, это посланники.\n\n"
+                "Итак, расскажите мне, что привело вас сюда сегодня. Не торопитесь. Мы никуда не спешим. "
+                "Просто позвольте себе начать говорить, и посмотрим, куда нас это приведет."
+            )
+    finally:
+        await stop_typing(typing_task)
+
+    await context.bot.send_message(chat_id, welcome_text, reply_markup=END_KEYBOARD)
+    await refresh_timer(chat_id, context)
+    print(f"✅ Сессия начата.")
 
 
 async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Логика начала новой сессии (вызывается из /start и кнопки 'Начать сессию')."""
-    print("🟢 Вызвана start_session")
-    # Завершаем предыдущую сессию, если она была активна (с очисткой истории)
-    await cleanup_session(context, clear_history=True, chat_id=update.effective_chat.id)
+    """Начало новой сессии: проверка кулдауна, затем запуск."""
+    print("🟢 Запуск start_session (проверка кулдауна)")
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    await ensure_user_data(context, user_id)
 
-    # Проверяем суточное ограничение
-    last_end = context.user_data.get('last_session_end')
+    # Если уже есть активная сессия
+    if 'session_start_time' in context.user_data:
+        await update.message.reply_text(
+            "У вас уже есть активная сессия. Завершите её командой /end или кнопкой.",
+            reply_markup=END_KEYBOARD
+        )
+        return
+
+    # Проверка кулдауна
+    last_end = context.user_data.get('last_session_end', 0)
     if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
         remaining = COOLDOWN_SECONDS - (time.time() - last_end)
         hours_left = int(remaining // 3600)
@@ -488,113 +599,111 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Инициализируем новую сессию
-    context.user_data['history'] = []
-    context.user_data['session_start_time'] = time.time()
-
-    # Запускаем задачу истечения времени (40 минут)
-    async def timeout_wrapper():
-        await asyncio.sleep(SESSION_DURATION)
-        await end_session_by_timeout(update.effective_chat.id, context)
-
-    context.user_data['expiration_task'] = asyncio.create_task(timeout_wrapper())
-
-    # Отправляем приветствие
-    welcome_text = (
-        "Я рад, что вы пришли. Правда. Знаете, самое трудное в этом путешествии, "
-        "которое мы называем жизнью, — это решимость сделать первый шаг. Прийти и сказать: "
-        "«Мне больно, и я больше не понимаю, кто я». Это уже акт огромного мужества.\n\n"
-        "Мы не знаем друг друга, и это пространство — особенное. Здесь нет места для светских "
-        "условностей или ролей, которые мы играем на работе и дома. Здесь мы можем поговорить "
-        "о том, что обычно остается за кадром.\n\n"
-        "Я не буду давать вам готовых ответов. У меня их нет. Но у меня есть вопросы, которые, "
-        "возможно, помогут нам услышать тихий голос вашей собственной души. Потому что, как я часто "
-        "говорю, невроз — это просто страдания души, которая не нашла своего смысла. Ваши симптомы — "
-        "это не враги, это посланники.\n\n"
-        "Итак, расскажите мне, что привело вас сюда сегодня. Не торопитесь. Мы никуда не спешим. "
-        "Просто позвольте себе начать говорить, и посмотрим, куда нас это приведет.\n\n"
-    )
-    await update.message.reply_text(welcome_text, reply_markup=END_KEYBOARD)
-
-    # Запускаем первый таймер (после приветствия)
-    await refresh_timer(update.effective_chat.id, context)
-
-    print("✅ Сессия начата")
+    # Кулдаун прошёл – запускаем сессию
+    await begin_session(chat_id, user_id, context)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start — просто вызывает start_session."""
+    """Команда /start."""
     print("📨 Получена команда /start")
     await start_session(update, context)
 
 
 async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение сессии по команде /end или кнопке."""
-    print("🔚 Получена команда /end или кнопка Завершить сессию")
+    print("🔚 Получена команда /end")
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    await ensure_user_data(context, user_id)
 
-    # Сохраняем копию истории перед очисткой
-    history = context.user_data.get('history', []).copy()
-
-    # Завершаем сессию (отменяем задачи, удаляем последний таймер, но историю пока не чистим)
-    await cleanup_session(context, clear_history=False, chat_id=chat_id)
-
-    # Генерируем итоговое сообщение, если была история
-    summary = await generate_session_summary(history) if history else None
-    final_message = summary if summary else END_MESSAGE
-
-    # Разбиваем длинное сообщение и отправляем по частям
-    parts = split_long_message(final_message)
-    for i, part in enumerate(parts):
-        if i == 0:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=part,
-                reply_markup=START_KEYBOARD
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=part
-            )
-
-    # Теперь окончательно очищаем историю
-    context.user_data['history'] = []
-    print("✅ Сессия завершена с итоговым сообщением")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    print(f"💬 Получено сообщение: {user_message}")
-
-    # Обработка кнопки "Начать сессию"
-    if user_message == "Начать сессию":
-        print("🟢 Нажата кнопка 'Начать сессию'")
-        await start_session(update, context)
-        return
-
-    # Обработка кнопки "Завершить сессию"
-    if user_message == "Завершить сессию":
-        print("🔚 Нажата кнопка 'Завершить сессию'")
-        await end(update, context)
-        return
-
-    # Проверяем, активна ли сессия (наличие session_start_time)
     if 'session_start_time' not in context.user_data:
-        print("⏸️ Сессия не активна, предлагаем начать")
         await update.message.reply_text(
-            "Сейчас нет активной сессии. Нажмите «Начать сессию», чтобы мы могли поговорить.",
+            "Сейчас нет активной сессии.",
             reply_markup=START_KEYBOARD
         )
         return
 
-    # --- НОВОЕ: запускаем периодическую отправку typing ---
+    history = context.user_data.get('history', []).copy()
+    await cleanup_session(context, clear_history=False, chat_id=chat_id)
+
+    # Запускаем имитацию печати на время генерации итога
+    typing_task = asyncio.create_task(
+        send_typing_periodically(chat_id, context)
+    )
+    try:
+        summary = await generate_session_summary(history) if history else None
+    finally:
+        await stop_typing(typing_task)
+
+    final_message = summary if summary else END_MESSAGE
+
+    parts = split_long_message(final_message)
+    for i, part in enumerate(parts):
+        if i == 0:
+            await context.bot.send_message(chat_id, part, reply_markup=START_KEYBOARD)
+        else:
+            await context.bot.send_message(chat_id, part)
+
+    now = time.time()
+    context.user_data['last_session_end'] = now
+    save_last_session_end(user_id, now)
+    context.user_data['history'] = []
+    print(f"✅ Сессия завершена.")
+
+    # Предлагаем оставить отзыв
+    await ask_feedback(chat_id, context)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений и кнопок."""
+    user_message = update.message.text
+    print(f"💬 Получено сообщение: {user_message}")
+
+    # Проверяем, ожидаем ли мы отзыв
+    if context.user_data.get('awaiting_feedback'):
+        feedback_text = user_message
+        user_id = update.effective_user.id
+        username = update.effective_user.username
+
+        if AUTHOR_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(AUTHOR_CHAT_ID),
+                    text=f"📬 Новый отзыв:\n\n{feedback_text}"
+                )
+            except Exception as e:
+                print(f"Не удалось отправить отзыв автору: {e}")
+
+        await update.message.reply_text(
+            "Спасибо за ваш отзыв! Он очень важен для меня.",
+            reply_markup=START_KEYBOARD
+        )
+        context.user_data['awaiting_feedback'] = False
+        return
+
+    # Кнопки-команды (только "Начать сессию" и "Завершить сессию")
+    if user_message == "Начать сессию":
+        await start_session(update, context)
+        return
+
+    if user_message == "Завершить сессию":
+        await end(update, context)
+        return
+
+    # Если сессия не активна
+    if 'session_start_time' not in context.user_data:
+        await update.message.reply_text(
+            "Сейчас нет активной сессии. Нажмите «Начать сессию».",
+            reply_markup=START_KEYBOARD
+        )
+        return
+
+    # Сессия активна – обрабатываем сообщение
     typing_task = asyncio.create_task(
         send_typing_periodically(update.effective_chat.id, context)
     )
     context.user_data['typing_task'] = typing_task
 
-    # Добавляем сообщение пользователя в историю
     if 'history' not in context.user_data:
         context.user_data['history'] = []
     context.user_data['history'].append({"role": "user", "content": user_message})
@@ -605,7 +714,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + context.user_data['history']
 
     try:
-        print("🔄 Отправляем запрос к DeepSeek...")
         response = await asyncio.to_thread(
             openai.ChatCompletion.create,
             model="deepseek-chat",
@@ -613,16 +721,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             max_tokens=1500,
             temperature=1
         )
-        print("✅ Ответ от DeepSeek получен")
         clean_reply = response.choices[0].message.content
-
-        # Сохраняем ответ в историю
         context.user_data['history'].append({"role": "assistant", "content": clean_reply})
 
         if len(context.user_data['history']) > MAX_HISTORY * 2:
             context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
-        # --- НОВОЕ: отменяем задачу typing перед отправкой ответа ---
         typing_task.cancel()
         try:
             await typing_task
@@ -630,7 +734,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         context.user_data.pop('typing_task', None)
 
-        # Отправляем ответ по частям
         parts = split_long_message(clean_reply)
         for i, part in enumerate(parts):
             if i == 0:
@@ -638,13 +741,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(part)
 
-        # Обновляем таймер
         await refresh_timer(update.effective_chat.id, context)
 
     except Exception as e:
         print(f"❌ Ошибка при запросе к DeepSeek: {e}")
-
-        # --- НОВОЕ: в случае ошибки тоже отменяем typing ---
         typing_task.cancel()
         try:
             await typing_task
@@ -652,32 +752,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         context.user_data.pop('typing_task', None)
 
-        error_message = f"Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже.\n\nДетали: {e}"
+        error_message = "Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже."
         await update.message.reply_text(error_message, reply_markup=END_KEYBOARD)
         await refresh_timer(update.effective_chat.id, context)
 
 
 def main():
-    print("🚀 Функция main() запущена!")
-    print(f"🔑 TELEGRAM_TOKEN загружен: {'да' if TELEGRAM_TOKEN else 'нет'}")
-    print(f"🔑 DEEPSEEK_API_KEY загружен: {'да' if DEEPSEEK_API_KEY else 'нет'}")
-    print(f"🔌 openai.api_base: {openai.api_base}")
-    
-    # Создаём приложение
+    print("🚀 Запуск бота...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    print("✅ Application создан")
 
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
+    app.add_handler(CommandHandler("feedback", feedback_command))
+    app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Обработчики добавлены")
 
-    # Запускаем бота
-    print("🔄 Запускаем polling...")
+    print("✅ Обработчики добавлены")
     app.run_polling(timeout=50, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    print("🐍 Скрипт bot.py запущен")
     main()
