@@ -283,7 +283,7 @@ async def generate_session_summary(history: list) -> str:
     history_copy.append({
         "role": "user",
         "content": (
-            "Наша сессия подходит к концу. Пожалуйста, напиши завершающее поддерживающее напутствие, "
+            "Наша сессия подходит к концу. Пожалуйста, напиши небольшое завершающее поддерживающее напутствие, "
             "учитывая всё, что мы обсуждали. Если уместно, мягко пригласи к следующей сессии. "
             "Сохрани свой обычный тон (Джеймс Холлис)."
         )
@@ -793,7 +793,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             model="deepseek-chat",
             messages=messages,
             max_tokens=1500,
-            temperature=1.5
+            temperature=1
         )
         clean_reply = response.choices[0].message.content
         context.user_data['history'].append({"role": "assistant", "content": clean_reply})
