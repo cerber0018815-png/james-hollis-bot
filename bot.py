@@ -671,17 +671,7 @@ async def send_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         return None
 
     prices = [LabeledPrice(label="Сессия (40 мин)", amount=PRICE)]
-    provider_data = json.dumps({
-        "receipt": {
-            "items": [{
-                "description": "Консультация (40 минут)",
-                "quantity": "1.00",
-                "amount": {"value": f"{PRICE/100:.2f}", "currency": CURRENCY},
-                "vat_code": 1
-            }]
-        }
-    })
-
+    
     invoice_message = await context.bot.send_invoice(
         chat_id=chat_id,
         title="Оплата сессии",
