@@ -175,7 +175,6 @@ async def ensure_user_data(context: ContextTypes.DEFAULT_TYPE, user_id: int):
 # ======================================
 
 # ===== ЗАГРУЗКА ПРОМПТА =====
-# Короткий промпт (можно заменить на полный позже)
 SYSTEM_PROMPT = """
 ехнические ограничения и форма ответов:
 
@@ -699,26 +698,12 @@ async def send_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /buy и inline-кнопки 'Приобрести' (с проверкой кулдауна)."""
-    # Определяем chat_id и user_id в зависимости от типа update
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        chat_id = query.message.chat.id
-        user_id = query.from_user.id
-
-        # Сохраняем ID сообщения с описанием услуги, чтобы удалить его после оплаты
-        context.user_data['service_message_id'] = query.message.message_id
-
-        # НЕ удаляем сообщение с описанием – оно остаётся
-        # await query.delete_message()   # удалено
-    else:
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
+    """Обработчик команды /buy (оставлен как запасной вариант)."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
 
     await ensure_user_data(context, user_id)
 
-    # Проверяем, нет ли активной сессии
     if 'session_start_time' in context.user_data:
         await context.bot.send_message(
             chat_id,
@@ -727,7 +712,6 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Проверка кулдауна
     last_end = context.user_data.get('last_session_end', 0)
     if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
         remaining = COOLDOWN_SECONDS - (time.time() - last_end)
@@ -741,7 +725,6 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Отправляем инвойс и сохраняем его message_id для последующего удаления
     invoice_message = await send_invoice(chat_id, context)
     if invoice_message:
         context.user_data['invoice_message_id'] = invoice_message.message_id
@@ -924,7 +907,7 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     else:
-        # Стандартная платная сессия
+        # Платная сессия: отправляем описание услуги и сразу инвойс
         service_text = (
             "🧘‍♂️ **Консультация (40 минут)**\n\n"
             "Вы получите безопасное пространство, где можно:\n"
@@ -932,17 +915,17 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Исследовать свои чувства и мысли\n"
             "• Получить бережный поддерживающий диалог\n\n"
             f"💰 Стоимость: {PRICE/100} {CURRENCY}\n\n"
-            "Сессия начнётся сразу после оплаты.\n"
-            "Нажмите кнопку ниже для оплаты.\n\n"
+            "Сессия начнётся сразу после оплаты.\n\n"
             "Примечание: Беседа не может заменить приём реального специалиста"
         )
-        keyboard = [[InlineKeyboardButton("💳 Приобрести", callback_data="buy")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            service_text,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        # Отправляем текстовое описание
+        service_msg = await update.message.reply_text(service_text, parse_mode='Markdown')
+        context.user_data['service_message_id'] = service_msg.message_id
+
+        # Отправляем инвойс
+        invoice_message = await send_invoice(chat_id, context)
+        if invoice_message:
+            context.user_data['invoice_message_id'] = invoice_message.message_id
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1109,10 +1092,10 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
-    app.add_handler(CommandHandler("buy", buy))  # защищённая команда
+    app.add_handler(CommandHandler("buy", buy))  # защищённая команда (оставлена)
     app.add_handler(CommandHandler("feedback", feedback_command))
     app.add_handler(CommandHandler("view_feedback", view_feedback))
-    app.add_handler(CallbackQueryHandler(buy, pattern="^buy$"))  # inline-кнопка "Приобрести"
+    # Удалён обработчик inline-кнопки "buy", так как её больше нет
     app.add_handler(CallbackQueryHandler(free_start_callback, pattern="^free_start$"))
     app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback_"))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
