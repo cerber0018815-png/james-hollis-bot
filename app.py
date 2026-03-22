@@ -13,29 +13,37 @@ def index():
 
 @app.route('/health')
 def health():
-    # Проверка здоровья – можно всегда отвечать OK,
-    # так как при падении бота процесс мониторинга завершит родителя.
     return "OK"
 
-def start_bot_process():
-    """Функция, выполняемая в дочернем процессе."""
+def start_bot_process(env):
+    """Функция, выполняемая в дочернем процессе. Принимает окружение как аргумент."""
+    # Устанавливаем переданное окружение для дочернего процесса
+    os.environ.update(env)
     try:
+        print("🚀 Дочерний процесс бота запущен")
+        print(f"TELEGRAM_TOKEN: {'установлен' if os.getenv('TELEGRAM_TOKEN') else 'НЕ УСТАНОВЛЕН'}")
+        print(f"DEEPSEEK_API_KEY: {'установлен' if os.getenv('DEEPSEEK_API_KEY') else 'НЕ УСТАНОВЛЕН'}")
+        print(f"PAYMENT_PROVIDER_TOKEN: {'установлен' if os.getenv('PAYMENT_PROVIDER_TOKEN') else 'НЕ УСТАНОВЛЕН'}")
+        sys.stdout.flush()
         run_bot()
     except Exception as e:
         print(f"❌ Критическая ошибка в боте: {e}")
         sys.stdout.flush()
-        sys.exit(1)  # Завершаем процесс с ошибкой
+        sys.exit(1)
 
 def monitor_process(proc):
     """Ожидает завершения дочернего процесса и завершает родителя."""
     proc.join()
     print("⚠️ Дочерний процесс бота завершился. Завершаем родительский процесс.")
     sys.stdout.flush()
-    os._exit(1)  # Принудительное завершение родителя → Render перезапустит сервис
+    os._exit(1)
 
 if __name__ == "__main__":
-    # Запускаем бота в отдельном процессе (не в потоке)
-    bot_process = multiprocessing.Process(target=start_bot_process, daemon=False)
+    # Явно копируем текущее окружение для передачи в дочерний процесс
+    env = os.environ.copy()
+
+    # Запускаем бота в отдельном процессе, передавая копию окружения
+    bot_process = multiprocessing.Process(target=start_bot_process, args=(env,), daemon=False)
     bot_process.start()
 
     # Поток для мониторинга дочернего процесса (демонический, чтобы не блокировать остановку)
