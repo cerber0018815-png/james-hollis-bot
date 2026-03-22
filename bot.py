@@ -318,7 +318,7 @@ SYSTEM_PROMPT = """
 
 MAX_HISTORY = 30
 SESSION_DURATION = 40 * 60  # 40 минут
-COOLDOWN_SECONDS = 1 * 60  # 1 минута (для теста; можно увеличить до 15*60)
+COOLDOWN_SECONDS = 24 * 3600  # 1 минута (для теста; можно увеличить до 15*60)
 TIMER_UPDATE_INTERVAL = 60
 
 END_MESSAGE = (
