@@ -19,7 +19,7 @@ load_dotenv()
 # ===== НАСТРОЙКИ =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
-PAYMENT_PROVIDER_TOKEN = "381764678:TEST:171961"
+PAYMENT_PROVIDER_TOKEN = os.getenv('PAYMENT_PROVIDER_TOKEN')
 CURRENCY = os.getenv('CURRENCY', 'RUB')
 PRICE = int(os.getenv('PRICE', 15000))  # цена в копейках
 AUTHOR_CHAT_ID = os.getenv('AUTHOR_CHAT_ID')  # Telegram ID администратора для отзывов
