@@ -27,14 +27,18 @@ AUTHOR_CHAT_ID = os.getenv('AUTHOR_CHAT_ID')  # Telegram ID администра
 # Флаг: использовать AI для генерации приветствия (True) или стандартный текст (False)
 USE_AI_WELCOME = os.getenv('USE_AI_WELCOME', 'True').lower() in ('true', '1', 'yes')
 
+# Флаг: включить платёжные функции (True/False)
+PAYMENT_ENABLED = os.getenv('PAYMENT_ENABLED', 'False').lower() in ('true', '1', 'yes')
+
 if not TELEGRAM_TOKEN or not DEEPSEEK_API_KEY:
     print("❌ Ошибка: TELEGRAM_TOKEN или DEEPSEEK_API_KEY не найдены!")
     sys.exit(1)
 else:
     print("✅ Переменные окружения загружены.")
 
-if not PAYMENT_PROVIDER_TOKEN:
-    print("⚠️ PAYMENT_PROVIDER_TOKEN не задан. Оплата недоступна.")
+if PAYMENT_ENABLED and not PAYMENT_PROVIDER_TOKEN:
+    print("⚠️ PAYMENT_ENABLED = True, но PAYMENT_PROVIDER_TOKEN не задан. Платежи будут недоступны.")
+    PAYMENT_ENABLED = False
 
 openai.api_base = "https://api.deepseek.com/v1"
 openai.api_key = DEEPSEEK_API_KEY
@@ -109,7 +113,9 @@ def save_last_session_end(user_id: int, last_session_end: float):
         print(f"❌ Ошибка записи в БД для user {user_id}: {e}")
 
 def get_free_session_used(user_id: int) -> bool:
-    """Возвращает True, если бесплатная сессия уже использована."""
+    """Возвращает True, если бесплатная сессия уже использована (только если PAYMENT_ENABLED)."""
+    if not PAYMENT_ENABLED:
+        return False
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -122,7 +128,9 @@ def get_free_session_used(user_id: int) -> bool:
         return False
 
 def set_free_session_used(user_id: int, used: bool = True):
-    """Устанавливает флаг использования бесплатной сессии."""
+    """Устанавливает флаг использования бесплатной сессии (только если PAYMENT_ENABLED)."""
+    if not PAYMENT_ENABLED:
+        return
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
         conn.execute('BEGIN IMMEDIATE')
@@ -320,22 +328,19 @@ END_MESSAGE = (
     "Носите это с собой до нашей следующей встречи. Берегите себя."
 )
 
-# Стандартное приветствие (используется если USE_AI_WELCOME = False)
 DEFAULT_WELCOME = (
     "Здравствуйте. Спасибо, что нашли в себе силы заглянуть в это тихое пространство. Мне очень важно, что вы здесь.\n\n"
     "Расскажите, что привело вас сюда сегодня, какой вопрос не даёт покоя? "
     "Чем подробнее вы сможете описать то, что чувствуете, "
-    "тем глубже мы сможем вместе заглянуть в это. Не спешите. У нас есть всё время, какое нужно. Я буду просто сидеть и слушать. "
+    "тем глубже мы сможем вместе заглянуть в это. Не спешите.\n\n"
+    "У нас есть всё время, какое нужно. Я буду просто сидеть и слушать. "
 )
 
-# Клавиатуры – только "Начать сессию" и "Завершить сессию"
 START_KEYBOARD = ReplyKeyboardMarkup([["Начать сессию"]], resize_keyboard=True)
 END_KEYBOARD = ReplyKeyboardMarkup([["Завершить сессию"]], resize_keyboard=True)
 
 
-# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def split_long_message(text: str, max_length: int = 4096) -> list[str]:
-    """Разбивает длинный текст по частям."""
     if len(text) <= max_length:
         return [text]
     parts = []
@@ -352,7 +357,6 @@ def split_long_message(text: str, max_length: int = 4096) -> list[str]:
 
 
 async def generate_session_summary(history: list) -> str:
-    """Генерирует итоговое напутствие через DeepSeek."""
     if not history:
         return None
     history_copy = history.copy()
@@ -382,9 +386,7 @@ async def generate_session_summary(history: list) -> str:
         return None
 
 
-# ===== ГЕНЕРАЦИЯ ПРИВЕТСТВИЯ =====
 async def generate_welcome_message() -> str:
-    """Генерирует уникальное приветствие через DeepSeek."""
     try:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -404,7 +406,7 @@ async def generate_welcome_message() -> str:
         return None
 
 
-# ===== ФУНКЦИИ ТАЙМЕРА =====
+# Функции таймера, имитации печати, завершения сессии (без изменений)
 async def update_timer_periodically(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
     print(f"🕒 [TIMER] Запущена задача для сообщения {message_id}")
     try:
@@ -413,14 +415,12 @@ async def update_timer_periodically(chat_id: int, message_id: int, context: Cont
             current_timer_id = context.user_data.get('timer_message_id')
             if current_timer_id != message_id:
                 break
-
             if 'session_start_time' not in context.user_data:
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
                 except:
                     pass
                 break
-
             elapsed = time.time() - context.user_data['session_start_time']
             remaining = SESSION_DURATION - elapsed
             if remaining <= 0:
@@ -429,11 +429,9 @@ async def update_timer_periodically(chat_id: int, message_id: int, context: Cont
                 except:
                     pass
                 break
-
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
             timer_text = f"⏳ Осталось: {minutes} мин {seconds} сек"
-
             try:
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
@@ -443,7 +441,6 @@ async def update_timer_periodically(chat_id: int, message_id: int, context: Cont
             except Exception as e:
                 print(f"🕒 [TIMER] Не удалось обновить таймер: {e}")
                 break
-
             await asyncio.sleep(TIMER_UPDATE_INTERVAL)
     except asyncio.CancelledError:
         try:
@@ -452,9 +449,7 @@ async def update_timer_periodically(chat_id: int, message_id: int, context: Cont
             pass
         raise
 
-
 async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Обновляет сообщение с таймером."""
     old_task = context.user_data.get('timer_task')
     if old_task and not old_task.done():
         old_task.cancel()
@@ -462,14 +457,12 @@ async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             await old_task
         except asyncio.CancelledError:
             pass
-
     old_msg_id = context.user_data.get('timer_message_id')
     if old_msg_id:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
         except:
             pass
-
     if 'session_start_time' in context.user_data:
         remaining = SESSION_DURATION - (time.time() - context.user_data['session_start_time'])
         if remaining > 0:
@@ -481,16 +474,13 @@ async def refresh_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 print(f"🔄 [REFRESH] Не удалось отправить таймер: {e}")
                 return
-
             context.user_data['timer_message_id'] = timer_msg.message_id
             task = asyncio.create_task(
                 update_timer_periodically(chat_id, timer_msg.message_id, context)
             )
             context.user_data['timer_task'] = task
 
-
 async def send_typing_periodically(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Имитация печати."""
     try:
         while True:
             try:
@@ -501,9 +491,7 @@ async def send_typing_periodically(chat_id: int, context: ContextTypes.DEFAULT_T
     except asyncio.CancelledError:
         pass
 
-
 async def stop_typing(typing_task: asyncio.Task):
-    """Отменяет задачу имитации печати."""
     if typing_task and not typing_task.done():
         typing_task.cancel()
         try:
@@ -511,49 +499,32 @@ async def stop_typing(typing_task: asyncio.Task):
         except asyncio.CancelledError:
             pass
 
-
-# ===== ФУНКЦИИ ЗАВЕРШЕНИЯ СЕССИИ =====
 async def end_session_by_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Завершение сессии по истечении 40 минут."""
     if 'session_start_time' not in context.user_data:
         return
-
     history = context.user_data.get('history', []).copy()
     user_id = context.user_data.get('user_id')
-
     await cleanup_session(context, clear_history=False, chat_id=chat_id)
-
-    # Запускаем имитацию печати на время генерации итога
-    typing_task = asyncio.create_task(
-        send_typing_periodically(chat_id, context)
-    )
+    typing_task = asyncio.create_task(send_typing_periodically(chat_id, context))
     try:
         summary = await generate_session_summary(history) if history else None
     finally:
         await stop_typing(typing_task)
-
     final_message = summary if summary else END_MESSAGE
-
     parts = split_long_message(final_message)
     for i, part in enumerate(parts):
         if i == 0:
             await context.bot.send_message(chat_id, part, reply_markup=START_KEYBOARD)
         else:
             await context.bot.send_message(chat_id, part)
-
     if user_id:
         now = time.time()
         context.user_data['last_session_end'] = now
         save_last_session_end(user_id, now)
-
     context.user_data['history'] = []
-
-    # Предлагаем оставить отзыв
     await ask_feedback(chat_id, context)
 
-
 async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: bool = True, chat_id: int = None):
-    """Завершает сессию, отменяет задачи."""
     timer_task = context.user_data.get('timer_task')
     if timer_task and not timer_task.done():
         timer_task.cancel()
@@ -561,7 +532,6 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
             await timer_task
         except asyncio.CancelledError:
             pass
-
     exp_task = context.user_data.get('expiration_task')
     if exp_task and not exp_task.done():
         exp_task.cancel()
@@ -569,7 +539,6 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
             await exp_task
         except asyncio.CancelledError:
             pass
-
     typing_task = context.user_data.get('typing_task')
     if typing_task and not typing_task.done():
         typing_task.cancel()
@@ -577,7 +546,6 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
             await typing_task
         except asyncio.CancelledError:
             pass
-
     if chat_id:
         timer_msg_id = context.user_data.get('timer_message_id')
         if timer_msg_id:
@@ -585,13 +553,10 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
                 await context.bot.delete_message(chat_id=chat_id, message_id=timer_msg_id)
             except:
                 pass
-
     if 'history' in context.user_data and context.user_data['history']:
         context.user_data['last_session_end'] = time.time()
-
     if clear_history:
         context.user_data['history'] = []
-
     context.user_data.pop('timer_task', None)
     context.user_data.pop('timer_message_id', None)
     context.user_data.pop('expiration_task', None)
@@ -599,9 +564,8 @@ async def cleanup_session(context: ContextTypes.DEFAULT_TYPE, clear_history: boo
     context.user_data.pop('session_start_time', None)
 
 
-# ===== ФУНКЦИИ ДЛЯ ОТЗЫВОВ =====
+# Функции для отзывов (без изменений)
 async def ask_feedback(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет inline‑клавиатуру для запроса отзыва."""
     keyboard = [
         [InlineKeyboardButton("📝 Оставить отзыв", callback_data="feedback_yes")],
         [InlineKeyboardButton("❌ Пропустить", callback_data="feedback_no")]
@@ -613,63 +577,44 @@ async def ask_feedback(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-
 async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на inline-кнопки отзыва."""
     query = update.callback_query
     await query.answer()
-
     if query.data == "feedback_yes":
         context.user_data['awaiting_feedback'] = True
         await query.edit_message_text("Пожалуйста, напишите Ваш отзыв одним сообщением. ⤵️")
-    else:  # feedback_no
+    else:
         await query.edit_message_text("Если захотите оставить отзыв позже, просто напишите /feedback.")
 
-
 async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /feedback для самостоятельного вызова."""
     await ask_feedback(update.effective_chat.id, context)
 
-
 async def view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выводит последние 10 отзывов (только для администратора, чей ID указан ниже)."""
     user_id = update.effective_user.id
-    # ⚠️ Временно указываем ID администратора напрямую (замените на свой!)
-    ADMIN_ID = 928589977  # <--- ВСТАВЬТЕ СВОЙ TELEGRAM ID
-
+    ADMIN_ID = 928589977  # Замените на свой
     if user_id != ADMIN_ID:
         await update.message.reply_text("У вас нет прав для просмотра отзывов.")
         return
-
     feedbacks = get_feedbacks(limit=10)
     if not feedbacks:
         await update.message.reply_text("Пока нет отзывов.")
         return
-
     message_lines = ["📋 **Последние 10 отзывов**:\n"]
     for fb in feedbacks:
         user_id, username, text, ts = fb
         dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
         message_lines.append(f"⏱️ {dt}\n💬 {text}\n")
         message_lines.append("-" * 30)
-
     full_message = "\n".join(message_lines)
     parts = split_long_message(full_message)
     for part in parts:
         await update.message.reply_text(part, parse_mode='Markdown')
 
 
-# ===== ПЛАТЁЖНЫЕ ФУНКЦИИ =====
+# Платёжные функции (только если PAYMENT_ENABLED)
 async def send_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет счёт пользователю и возвращает отправленное сообщение."""
-    if not PAYMENT_PROVIDER_TOKEN:
-        await context.bot.send_message(
-            chat_id,
-            "Платёжный сервис временно недоступен. Попробуйте позже.",
-            reply_markup=START_KEYBOARD
-        )
+    if not PAYMENT_ENABLED or not PAYMENT_PROVIDER_TOKEN:
         return None
-
     prices = [LabeledPrice(label="Сессия (40 мин)", amount=PRICE)]
     provider_data = json.dumps({
         "receipt": {
@@ -681,7 +626,6 @@ async def send_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             }]
         }
     })
-
     invoice_message = await context.bot.send_invoice(
         chat_id=chat_id,
         title="Оплата сессии",
@@ -696,22 +640,16 @@ async def send_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     )
     return invoice_message
 
-
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /buy (оставлен как запасной вариант)."""
+    if not PAYMENT_ENABLED:
+        await update.message.reply_text("Платёжные функции отключены администратором.")
+        return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-
     await ensure_user_data(context, user_id)
-
     if 'session_start_time' in context.user_data:
-        await context.bot.send_message(
-            chat_id,
-            "У вас уже есть активная сессия. Завершите её командой /end или кнопкой.",
-            reply_markup=END_KEYBOARD
-        )
+        await context.bot.send_message(chat_id, "У вас уже есть активная сессия.", reply_markup=END_KEYBOARD)
         return
-
     last_end = context.user_data.get('last_session_end', 0)
     if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
         remaining = COOLDOWN_SECONDS - (time.time() - last_end)
@@ -724,52 +662,41 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=START_KEYBOARD
         )
         return
-
     invoice_message = await send_invoice(chat_id, context)
     if invoice_message:
         context.user_data['invoice_message_id'] = invoice_message.message_id
 
-
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обязательный ответ на предварительный запрос."""
-    await update.pre_checkout_query.answer(ok=True)
-
+    if PAYMENT_ENABLED:
+        await update.pre_checkout_query.answer(ok=True)
+    else:
+        await update.pre_checkout_query.answer(ok=False, error_message="Платежи временно недоступны.")
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка успешной оплаты: удаляем старые сообщения и запускаем сессию."""
+    if not PAYMENT_ENABLED:
+        await update.message.reply_text("Платежи отключены, сессия не может быть начата.")
+        return
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
-    # Удаляем сообщение с описанием услуги (если оно было сохранено)
     service_msg_id = context.user_data.get('service_message_id')
     if service_msg_id:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=service_msg_id)
-        except Exception as e:
-            print(f"Не удалось удалить сообщение с описанием: {e}")
+        except:
+            pass
         context.user_data.pop('service_message_id', None)
-
-    # Удаляем сообщение с инвойсом (если сохранено)
     invoice_msg_id = context.user_data.get('invoice_message_id')
     if invoice_msg_id:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=invoice_msg_id)
-        except Exception as e:
-            print(f"Не удалось удалить сообщение с инвойсом: {e}")
+        except:
+            pass
         context.user_data.pop('invoice_message_id', None)
-
-    # Подтверждаем оплату пользователю
-    await update.message.reply_text(
-        "✅ Оплата прошла успешно! Сейчас начнём сессию.",
-        reply_markup=END_KEYBOARD
-    )
-
-    # Проверяем ещё раз кулдаун (на случай, если прошло много времени между оплатой и подтверждением)
+    await update.message.reply_text("✅ Оплата прошла успешно! Сейчас начнём сессию.", reply_markup=END_KEYBOARD)
     await ensure_user_data(context, user_id)
     if 'session_start_time' in context.user_data:
         await update.message.reply_text("У вас уже есть активная сессия.")
         return
-
     last_end = context.user_data.get('last_session_end', 0)
     if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
         remaining = COOLDOWN_SECONDS - (time.time() - last_end)
@@ -780,54 +707,12 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=START_KEYBOARD
         )
         return
-
-    # Начинаем сессию
     await start_session_core(chat_id, user_id, context)
 
 
-# ===== БЕСПЛАТНАЯ СЕССИЯ =====
-async def free_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопки 'Начать бесплатную сессию'."""
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    chat_id = query.message.chat.id
-
-    # Проверяем, не использовал ли уже бесплатную сессию
-    if get_free_session_used(user_id):
-        await query.edit_message_text("Бесплатная сессия уже была использована.")
-        return
-
-    # Проверка активной сессии в user_data
-    if 'session_start_time' in context.user_data:
-        await query.edit_message_text("У вас уже есть активная сессия.")
-        return
-
-    # Проверка кулдауна (из БД)
-    last_end = get_last_session_end(user_id)
-    if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
-        remaining = COOLDOWN_SECONDS - (time.time() - last_end)
-        hours_left = int(remaining // 3600)
-        minutes_left = int((remaining % 3600) // 60)
-        await query.edit_message_text(
-            f"К сожалению, кулдаун ещё не прошёл. Подождите {hours_left} ч {minutes_left} мин."
-        )
-        return
-
-    # Удаляем сообщение с кнопкой
-    await query.delete_message()
-
-    # Устанавливаем флаг бесплатной сессии в БД сразу, чтобы предотвратить повторный старт
-    set_free_session_used(user_id, True)
-
-    # Запускаем сессию
-    await start_session_core(chat_id, user_id, context)
-
-
+# Функция запуска сессии (общая)
 async def start_session_core(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Общая логика запуска сессии (после оплаты или бесплатного старта)."""
     await ensure_user_data(context, user_id)
-
     context.user_data['user_id'] = user_id
     context.user_data['history'] = []
     context.user_data['session_start_time'] = time.time()
@@ -838,10 +723,7 @@ async def start_session_core(chat_id: int, user_id: int, context: ContextTypes.D
 
     context.user_data['expiration_task'] = asyncio.create_task(timeout_wrapper())
 
-    # Запускаем имитацию печати на время генерации приветствия
-    typing_task = asyncio.create_task(
-        send_typing_periodically(chat_id, context)
-    )
+    typing_task = asyncio.create_task(send_typing_periodically(chat_id, context))
     try:
         if USE_AI_WELCOME:
             welcome_text = await generate_welcome_message()
@@ -857,10 +739,9 @@ async def start_session_core(chat_id: int, user_id: int, context: ContextTypes.D
     print(f"✅ Сессия начата.")
 
 
-# ===== ОСНОВНЫЕ ФУНКЦИИ СЕССИИ =====
+# Основная функция старта сессии
 async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало новой сессии: проверка кулдауна, затем предложение оплаты или бесплатной."""
-    print("🟢 Запуск start_session (проверка кулдауна и бесплатной)")
+    print("🟢 Запуск start_session")
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     await ensure_user_data(context, user_id)
@@ -886,11 +767,14 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Проверка, доступна ли бесплатная сессия
-    free_available = not get_free_session_used(user_id)
+    # Если платежи отключены — запускаем сессию сразу
+    if not PAYMENT_ENABLED:
+        await start_session_core(chat_id, user_id, context)
+        return
 
+    # Иначе — логика с бесплатной/платной сессией
+    free_available = not get_free_session_used(user_id)
     if free_available:
-        # Предложение бесплатной сессии
         keyboard = [[InlineKeyboardButton("🎁 Начать бесплатную сессию", callback_data="free_start")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
@@ -907,7 +791,6 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     else:
-        # Платная сессия: отправляем описание услуги и сразу инвойс
         service_text = (
             "🧘‍♂️ **Консультация (40 минут)**\n\n"
             "Вы получите безопасное пространство, где можно:\n"
@@ -918,99 +801,98 @@ async def start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Сессия начнётся сразу после оплаты.\n\n"
             "Примечание: Беседа не может заменить приём реального специалиста"
         )
-        # Отправляем текстовое описание
         service_msg = await update.message.reply_text(service_text, parse_mode='Markdown')
         context.user_data['service_message_id'] = service_msg.message_id
-
-        # Отправляем инвойс
         invoice_message = await send_invoice(chat_id, context)
         if invoice_message:
             context.user_data['invoice_message_id'] = invoice_message.message_id
+        else:
+            await update.message.reply_text("Платёжный сервис временно недоступен. Попробуйте позже.")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start."""
     print("📨 Получена команда /start")
     await start_session(update, context)
 
 
 async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Завершение сессии по команде /end или кнопке."""
     print("🔚 Получена команда /end")
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     await ensure_user_data(context, user_id)
-
     if 'session_start_time' not in context.user_data:
-        await update.message.reply_text(
-            "Сейчас нет активной сессии.",
-            reply_markup=START_KEYBOARD
-        )
+        await update.message.reply_text("Сейчас нет активной сессии.", reply_markup=START_KEYBOARD)
         return
-
     history = context.user_data.get('history', []).copy()
     await cleanup_session(context, clear_history=False, chat_id=chat_id)
-
-    # Запускаем имитацию печати на время генерации итога
-    typing_task = asyncio.create_task(
-        send_typing_periodically(chat_id, context)
-    )
+    typing_task = asyncio.create_task(send_typing_periodically(chat_id, context))
     try:
         summary = await generate_session_summary(history) if history else None
     finally:
         await stop_typing(typing_task)
-
     final_message = summary if summary else END_MESSAGE
-
     parts = split_long_message(final_message)
     for i, part in enumerate(parts):
         if i == 0:
             await context.bot.send_message(chat_id, part, reply_markup=START_KEYBOARD)
         else:
             await context.bot.send_message(chat_id, part)
-
     now = time.time()
     context.user_data['last_session_end'] = now
     save_last_session_end(user_id, now)
     context.user_data['history'] = []
     print(f"✅ Сессия завершена.")
-
-    # Предлагаем оставить отзыв
     await ask_feedback(chat_id, context)
 
 
+async def free_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Начать бесплатную сессию' (используется только при PAYMENT_ENABLED)."""
+    if not PAYMENT_ENABLED:
+        # Если платежи отключены, эта кнопка не показывается, но на всякий случай
+        await update.callback_query.answer("Функция недоступна.")
+        return
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    chat_id = query.message.chat.id
+    if get_free_session_used(user_id):
+        await query.edit_message_text("Бесплатная сессия уже была использована.")
+        return
+    if 'session_start_time' in context.user_data:
+        await query.edit_message_text("У вас уже есть активная сессия.")
+        return
+    last_end = get_last_session_end(user_id)
+    if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
+        remaining = COOLDOWN_SECONDS - (time.time() - last_end)
+        hours_left = int(remaining // 3600)
+        minutes_left = int((remaining % 3600) // 60)
+        await query.edit_message_text(
+            f"К сожалению, кулдаун ещё не прошёл. Подождите {hours_left} ч {minutes_left} мин."
+        )
+        return
+    await query.delete_message()
+    set_free_session_used(user_id, True)
+    await start_session_core(chat_id, user_id, context)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений и кнопок."""
     user_message = update.message.text
     print(f"💬 Получено сообщение: {user_message}")
 
-    # Проверяем, ожидаем ли мы отзыв
     if context.user_data.get('awaiting_feedback'):
         feedback_text = user_message
         user_id = update.effective_user.id
         username = update.effective_user.username or "без имени"
-
-        # Сохраняем отзыв в БД
         save_feedback(user_id, username, feedback_text)
-
-        # Отправляем автору, если указан
         if AUTHOR_CHAT_ID:
             try:
-                await context.bot.send_message(
-                    chat_id=int(AUTHOR_CHAT_ID),
-                    text=f"📬 Новый отзыв:\n\n{feedback_text}"
-                )
+                await context.bot.send_message(chat_id=int(AUTHOR_CHAT_ID), text=f"📬 Новый отзыв:\n\n{feedback_text}")
             except Exception as e:
                 print(f"Не удалось отправить отзыв автору: {e}")
-
-        await update.message.reply_text(
-            "Спасибо за ваш отзыв! Он очень важен для меня.",
-            reply_markup=START_KEYBOARD
-        )
+        await update.message.reply_text("Спасибо за ваш отзыв! Он очень важен для меня.", reply_markup=START_KEYBOARD)
         context.user_data['awaiting_feedback'] = False
         return
 
-    # Кнопки-команды (только "Начать сессию" и "Завершить сессию")
     if user_message == "Начать сессию":
         await start_session(update, context)
         return
@@ -1019,24 +901,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await end(update, context)
         return
 
-    # Если сессия не активна
     if 'session_start_time' not in context.user_data:
-        await update.message.reply_text(
-            "Сейчас нет активной сессии. Нажмите «Начать сессию».",
-            reply_markup=START_KEYBOARD
-        )
+        await update.message.reply_text("Сейчас нет активной сессии. Нажмите «Начать сессию».", reply_markup=START_KEYBOARD)
         return
 
-    # Сессия активна – обрабатываем сообщение
-    typing_task = asyncio.create_task(
-        send_typing_periodically(update.effective_chat.id, context)
-    )
+    typing_task = asyncio.create_task(send_typing_periodically(update.effective_chat.id, context))
     context.user_data['typing_task'] = typing_task
 
     if 'history' not in context.user_data:
         context.user_data['history'] = []
     context.user_data['history'].append({"role": "user", "content": user_message})
-
     if len(context.user_data['history']) > MAX_HISTORY * 2:
         context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
@@ -1052,7 +926,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         clean_reply = response.choices[0].message.content
         context.user_data['history'].append({"role": "assistant", "content": clean_reply})
-
         if len(context.user_data['history']) > MAX_HISTORY * 2:
             context.user_data['history'] = context.user_data['history'][-MAX_HISTORY*2:]
 
@@ -1080,7 +953,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except asyncio.CancelledError:
             pass
         context.user_data.pop('typing_task', None)
-
         error_message = "Извините, произошла техническая ошибка. Пожалуйста, попробуйте позже."
         await update.message.reply_text(error_message, reply_markup=END_KEYBOARD)
         await refresh_timer(update.effective_chat.id, context)
@@ -1092,14 +964,18 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("end", end))
-    app.add_handler(CommandHandler("buy", buy))  # защищённая команда (оставлена)
     app.add_handler(CommandHandler("feedback", feedback_command))
     app.add_handler(CommandHandler("view_feedback", view_feedback))
-    # Удалён обработчик inline-кнопки "buy", так как её больше нет
+
+    if PAYMENT_ENABLED:
+        app.add_handler(CommandHandler("buy", buy))
+        app.add_handler(PreCheckoutQueryHandler(pre_checkout))
+        app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+
+    # Обработчики inline-кнопок
     app.add_handler(CallbackQueryHandler(free_start_callback, pattern="^free_start$"))
     app.add_handler(CallbackQueryHandler(feedback_callback, pattern="^feedback_"))
-    app.add_handler(PreCheckoutQueryHandler(pre_checkout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("✅ Обработчики добавлены")
