@@ -323,9 +323,9 @@ END_MESSAGE = (
 # Стандартное приветствие (используется если USE_AI_WELCOME = False)
 DEFAULT_WELCOME = (
     "Здравствуйте. Спасибо, что нашли в себе силы заглянуть в это тихое пространство. Мне очень важно, что вы здесь.\n\n"
-    "Расскажите, что привело вас сюда сегодня, какой вопрос не даёт покоя? "
-    " Чем подробнее вы сможете описать то, что чувствуете, "
-    "тем глубже мы сможем вместе заглянуть в это. Не спешите. У нас есть всё время, какое нужно. Я буду просто сидеть и слушать. "
+    "Я буду просто сидеть и слушать. Расскажите, что привело вас сюда сегодня. О чём болит ваше сердце, что утомило душу, "
+    "какой вопрос не даёт покоя? Чем подробнее вы сможете описать то, что чувствуете, "
+    "тем глубже мы сможем вместе заглянуть в это. Не спешите. У нас есть всё время, какое нужно. "
 )
 
 # Клавиатуры – только "Начать сессию" и "Завершить сессию"
@@ -657,6 +657,204 @@ async def view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = split_long_message(full_message)
     for part in parts:
         await update.message.reply_text(part, parse_mode='Markdown')
+
+
+# ===== ПЛАТЁЖНЫЕ ФУНКЦИИ =====
+async def send_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет счёт пользователю и возвращает отправленное сообщение."""
+    if not PAYMENT_PROVIDER_TOKEN:
+        await context.bot.send_message(
+            chat_id,
+            "Платёжный сервис временно недоступен. Попробуйте позже.",
+            reply_markup=START_KEYBOARD
+        )
+        return None
+
+    prices = [LabeledPrice(label="Сессия (40 мин)", amount=PRICE)]
+    provider_data = json.dumps({
+        "receipt": {
+            "items": [{
+                "description": "Консультация (40 минут)",
+                "quantity": "1.00",
+                "amount": {"value": f"{PRICE/100:.2f}", "currency": CURRENCY},
+                "vat_code": 1
+            }]
+        }
+    })
+
+    invoice_message = await context.bot.send_invoice(
+        chat_id=chat_id,
+        title="Оплата сессии",
+        description="Одна консультация (40 минут).",
+        payload="session_payment",
+        provider_token=PAYMENT_PROVIDER_TOKEN,
+        currency=CURRENCY,
+        prices=prices,
+        provider_data=provider_data,
+        need_email=True,
+        send_email_to_provider=True
+    )
+    return invoice_message
+
+
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /buy (оставлен как запасной вариант)."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    await ensure_user_data(context, user_id)
+
+    if 'session_start_time' in context.user_data:
+        await context.bot.send_message(
+            chat_id,
+            "У вас уже есть активная сессия. Завершите её командой /end или кнопкой.",
+            reply_markup=END_KEYBOARD
+        )
+        return
+
+    last_end = context.user_data.get('last_session_end', 0)
+    if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
+        remaining = COOLDOWN_SECONDS - (time.time() - last_end)
+        hours_left = int(remaining // 3600)
+        minutes_left = int((remaining % 3600) // 60)
+        await context.bot.send_message(
+            chat_id,
+            f"Я рад нашей встрече, но для глубокой работы важно делать перерывы. "
+            f"Сессии возможны не чаще раза в сутки. Пожалуйста, приходите через {hours_left} ч {minutes_left} мин.",
+            reply_markup=START_KEYBOARD
+        )
+        return
+
+    invoice_message = await send_invoice(chat_id, context)
+    if invoice_message:
+        context.user_data['invoice_message_id'] = invoice_message.message_id
+
+
+async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обязательный ответ на предварительный запрос."""
+    await update.pre_checkout_query.answer(ok=True)
+
+
+async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка успешной оплаты: удаляем старые сообщения и запускаем сессию."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # Удаляем сообщение с описанием услуги (если оно было сохранено)
+    service_msg_id = context.user_data.get('service_message_id')
+    if service_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=service_msg_id)
+        except Exception as e:
+            print(f"Не удалось удалить сообщение с описанием: {e}")
+        context.user_data.pop('service_message_id', None)
+
+    # Удаляем сообщение с инвойсом (если сохранено)
+    invoice_msg_id = context.user_data.get('invoice_message_id')
+    if invoice_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=invoice_msg_id)
+        except Exception as e:
+            print(f"Не удалось удалить сообщение с инвойсом: {e}")
+        context.user_data.pop('invoice_message_id', None)
+
+    # Подтверждаем оплату пользователю
+    await update.message.reply_text(
+        "✅ Оплата прошла успешно! Сейчас начнём сессию.",
+        reply_markup=END_KEYBOARD
+    )
+
+    # Проверяем ещё раз кулдаун (на случай, если прошло много времени между оплатой и подтверждением)
+    await ensure_user_data(context, user_id)
+    if 'session_start_time' in context.user_data:
+        await update.message.reply_text("У вас уже есть активная сессия.")
+        return
+
+    last_end = context.user_data.get('last_session_end', 0)
+    if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
+        remaining = COOLDOWN_SECONDS - (time.time() - last_end)
+        hours_left = int(remaining // 3600)
+        minutes_left = int((remaining % 3600) // 60)
+        await update.message.reply_text(
+            f"К сожалению, кулдаун ещё не прошёл. Подождите {hours_left} ч {minutes_left} мин.",
+            reply_markup=START_KEYBOARD
+        )
+        return
+
+    # Начинаем сессию
+    await start_session_core(chat_id, user_id, context)
+
+
+# ===== БЕСПЛАТНАЯ СЕССИЯ =====
+async def free_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Начать бесплатную сессию'."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    chat_id = query.message.chat.id
+
+    # Проверяем, не использовал ли уже бесплатную сессию
+    if get_free_session_used(user_id):
+        await query.edit_message_text("Бесплатная сессия уже была использована.")
+        return
+
+    # Проверка активной сессии в user_data
+    if 'session_start_time' in context.user_data:
+        await query.edit_message_text("У вас уже есть активная сессия.")
+        return
+
+    # Проверка кулдауна (из БД)
+    last_end = get_last_session_end(user_id)
+    if last_end and (time.time() - last_end) < COOLDOWN_SECONDS:
+        remaining = COOLDOWN_SECONDS - (time.time() - last_end)
+        hours_left = int(remaining // 3600)
+        minutes_left = int((remaining % 3600) // 60)
+        await query.edit_message_text(
+            f"К сожалению, кулдаун ещё не прошёл. Подождите {hours_left} ч {minutes_left} мин."
+        )
+        return
+
+    # Удаляем сообщение с кнопкой
+    await query.delete_message()
+
+    # Устанавливаем флаг бесплатной сессии в БД сразу, чтобы предотвратить повторный старт
+    set_free_session_used(user_id, True)
+
+    # Запускаем сессию
+    await start_session_core(chat_id, user_id, context)
+
+
+async def start_session_core(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Общая логика запуска сессии (после оплаты или бесплатного старта)."""
+    await ensure_user_data(context, user_id)
+
+    context.user_data['user_id'] = user_id
+    context.user_data['history'] = []
+    context.user_data['session_start_time'] = time.time()
+
+    async def timeout_wrapper():
+        await asyncio.sleep(SESSION_DURATION)
+        await end_session_by_timeout(chat_id, context)
+
+    context.user_data['expiration_task'] = asyncio.create_task(timeout_wrapper())
+
+    # Запускаем имитацию печати на время генерации приветствия
+    typing_task = asyncio.create_task(
+        send_typing_periodically(chat_id, context)
+    )
+    try:
+        if USE_AI_WELCOME:
+            welcome_text = await generate_welcome_message()
+            if not welcome_text:
+                welcome_text = DEFAULT_WELCOME
+        else:
+            welcome_text = DEFAULT_WELCOME
+    finally:
+        await stop_typing(typing_task)
+
+    await context.bot.send_message(chat_id, welcome_text, reply_markup=END_KEYBOARD)
+    await refresh_timer(chat_id, context)
+    print(f"✅ Сессия начата.")
 
 
 # ===== ОСНОВНЫЕ ФУНКЦИИ СЕССИИ =====
